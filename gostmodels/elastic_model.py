@@ -40,7 +40,12 @@ ElasticModel — базовий клас для роботи з часткови
 from __future__ import annotations
 
 
-from typing import Any, Annotated, Mapping, Self, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Annotated, Mapping, Union, get_args, get_origin, get_type_hints
+
+if TYPE_CHECKING:
+    # `Self` з'явився в typing лише у 3.11, а пакет оголошує підтримку 3.10. Вживається він виключно в анотаціях
+    # повернення, які `from __future__ import annotations` робить рядками, тому в рантаймі імпорт не потрібен.
+    from typing import Self
 from functools import lru_cache
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, TypeAdapter, ValidationError
@@ -50,8 +55,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 # =========================
-#   Helper Entities 
+#   Helper Entities
 # =========================
+
+class NotLoadedFieldError(AttributeError):
+    """
+    The field is declared in the model but was not loaded into this instance, so there is nothing to read.
+
+    Inherits `AttributeError` on purpose: existing code that catches the standard attribute error keeps working.
+    The flip side is that `hasattr` returns False and `getattr` with a default returns that default — both silence the contract violation.
+
+    Поле оголошене в моделі, але не було завантажене в цей інстанс, тому читати його нічим.
+
+    Нащадок `AttributeError` навмисно: наявний код, який ловить штатну помилку доступу, лишається робочим.
+    Зворотний бік — `hasattr` дає False, а `getattr` з дефолтом віддає дефолт, тобто обидва глушать порушення контракту.
+    """
+
 
 _SYSTEM_ATTRS = (
     'model_config',
@@ -248,7 +267,9 @@ class ElasticModel(BaseModel):
         
         # Словник аліасів {"_id": "id"}
         alias_to_name = {f.alias or n: n for n, f in model_fields.items()}
-        alias_is_allowed = cls.model_config.get('populate_by_name', False)
+        # Читаємо обидва ключі: старий лишається валідним і на ньому тримаються наявні тести, актуальний — документований API.
+        # pydantic не розгортає актуальний ключ у старий, тому перевірки лише одного з них недостатньо.
+        alias_is_allowed = cls.model_config.get('populate_by_name', False) or cls.model_config.get('validate_by_name', False)
         def get_model_name_from_data_name(data_name: str) -> str:
             """
             Поверне назву поля моделі до якого відноситься data_name, звірить по аліасам моделі
@@ -320,7 +341,12 @@ class ElasticModel(BaseModel):
     
     @property
     def elastic_loaded_fields(self) -> set[str]:
-        return self._elastic_loaded_fields
+        """
+        Поля, які справді були завантажені в цей інстанс (юзерські, без дефолтів, разом із невідомими ключами з даних).
+
+        Віддається копія: внутрішній набір несе стан моделі, тому його мутація змусила б `elastic_is_loaded` брехати.
+        """
+        return set(self._elastic_loaded_fields)
 
     def elastic_is_loaded(self, name: str) -> bool:
         """
@@ -386,6 +412,20 @@ class ElasticModel(BaseModel):
     # Access/Assignment Behavior
     # ---------------------------
 
+    def __getattr__(self, name: str) -> Any:
+        """
+        Перехоплює читання лише тих імен, яких не знайшов звичайний пошук атрибута.
+
+        Завантажене поле сюди не доходить, тому на успішному читанні не виконується жодного коду.
+        Оголошене, але не завантажене поле дає `NotLoadedFieldError`. Решта імен делегується в pydantic:
+        він віддасть значення при `extra='allow'` або підніме штатну помилку доступу.
+        """
+        # Перелік полів беремо з класу: звернення через інстанс знову входить у пошук атрибута, тобто ризик рекурсії всередині перехоплювача.
+        if name in type(self).model_fields:
+            raise NotLoadedFieldError(f"Field '{name}' is declared in {type(self).__name__} but was not loaded into this instance")
+
+        return super().__getattr__(name)
+
     def __delattr__(self, name: str) -> None:
         super().__delattr__(name)
 
@@ -402,6 +442,11 @@ class ElasticModel(BaseModel):
         # Актуалізовуємо `elastic_loaded_fields`, вписуємо нове юзерське поле
         elastic_finished = self._elastic_finished
         if elastic_finished:
+            # Приватні імена не є завантаженими даними. Фільтр прибирає весь клас протікань, а не лише службовий
+            # прапорець: протікав би будь-який приватний атрибут, присвоєний після побудови інстансу.
+            if name.startswith('_'):
+                return
+
             elastic_loaded_fields = self._elastic_loaded_fields
             elastic_loaded_fields.add(name)
         

@@ -549,4 +549,230 @@ def test_attributes():
     assert bm_2._id == 11
 
 
+# --------------------------
+# Публічний контракт: NotLoadedFieldError
+# --------------------------
+
+def test_not_loaded_field_error_exported_from_package():
+    """
+    README інструктує імпортувати тип помилки з кореня пакета, тому цей імпорт є частиною публічного контракту.
+
+    Імпорт зроблено локальним навмисно: на рівні модуля відсутній експорт обриває збирання всього файлу,
+    і замість одного цільового падіння отримуємо помилку collection на всіх тестах набору.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    # Наявні тести очікують AttributeError на незавантаженому полі, тому базовий клас входить у контракт.
+    assert issubclass(NotLoadedFieldError, AttributeError)
+
+
+def test_unloaded_declared_field_raises_not_loaded_field_error():
+    """
+    Оголошене поле, якого не було в даних при `defaults=False`, фізично відсутнє в інстансі,
+    тому його читання має давати помилку бібліотеки, а не штатну помилку доступу.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    u = UserSlim.elastic_create({"created": {"at": "t", "by": "sys"}}, validate=False, defaults=False)
+
+    with pytest.raises(NotLoadedFieldError):
+        _ = u.email
+
+
+def test_undeclared_name_keeps_standard_access_behavior():
+    """
+    Неоголошене ім'я перехоплювач пропускає далі: при `extra='allow'` повертається значення,
+    при `extra='ignore'` лишається штатна помилка доступу — і вона не є помилкою бібліотеки.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    class UIgnore(ElasticModel):
+        model_config = ConfigDict(extra='ignore')
+        a: int
+
+    class UAllow(ElasticModel):
+        model_config = ConfigDict(extra='allow')
+        a: int
+
+    ua = UAllow.elastic_create({"a": 1, "unknown": 2}, validate=False)
+    assert ua.unknown == 2
+
+    ui = UIgnore.elastic_create({"a": 1, "unknown": 2}, validate=False)
+    with pytest.raises(AttributeError) as exc_info:
+        _ = ui.unknown
+    assert not isinstance(exc_info.value, NotLoadedFieldError)
+
+
+def test_not_loaded_field_error_message_names_the_field():
+    """
+    NFR-3: повідомлення називає поле. Окремий тест, бо doctest під `IGNORE_EXCEPTION_DETAIL` текст повідомлення ігнорує.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    u = UserSlim.elastic_create({"created": {"at": "t", "by": "sys"}}, validate=False, defaults=False)
+
+    with pytest.raises(NotLoadedFieldError) as exc_info:
+        _ = u.email
+    assert "email" in str(exc_info.value)
+
+
+def test_interceptor_not_executed_when_reading_loaded_field():
+    """
+    NFR-2 перевіряється структурно: перехоплювач спрацьовує лише після невдалого звичайного пошуку,
+    тому читання завантаженого поля не виконує його коду.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    intercepted: list[str] = []
+
+    class Counted(ElasticModel):
+        a: int
+        b: int
+
+        def __getattr__(self, name: str) -> Any:
+            intercepted.append(name)
+            return super().__getattr__(name)
+
+    m = Counted.elastic_create({"a": 1}, validate=False, defaults=False)
+    intercepted.clear()  # Конструктор читає службові PrivateAttr тим самим механізмом, тому рахуємо лише звернення після побудови.
+
+    assert m.a == 1
+    assert intercepted == []
+
+    with pytest.raises(NotLoadedFieldError):
+        _ = m.b
+    assert intercepted == ["b"]
+
+
+def test_guarantee_boundary_hasattr_and_getattr_with_default():
+    """
+    Межа гарантії 1: успадкування від штатної помилки доступу означає, що перевірка наявності атрибута
+    дає «немає», а читання з дефолтом віддає дефолт. Обидва способи глушать порушення контракту.
+    """
+    u = UserSlim.elastic_create({"created": {"at": "t", "by": "sys"}}, validate=False, defaults=False)
+
+    assert hasattr(u, "email") is False
+    assert getattr(u, "email", "fallback") == "fallback"
+
+
+def test_guarantee_boundary_field_shadowing_parent_attribute():
+    """
+    Межа гарантії 2: поле з іменем атрибута батьківського класу знаходить звичайний пошук, тому перехоплювач
+    не викликається і помилки немає. pydantic попереджає про таке затінення на етапі оголошення класу.
+    """
+    class Shadowing(ElasticModel):
+        copy: str
+
+    m = Shadowing.elastic_create({}, validate=False, defaults=False)
+
+    assert callable(m.copy)
+
+
+# --------------------------
+# Публічний контракт: elastic_loaded_fields
+# --------------------------
+
+def test_loaded_fields_exclude_library_service_names():
+    """
+    Перелік має містити лише завантажені дані. Службовий прапорець завершення протікав туди,
+    бо `__setattr__` перевіряє його вже після виклику `super()`.
+    """
+    u = UserSlim.elastic_create({"email": "a@b.com", "created": {"at": "t", "by": "s"}}, validate=False)
+
+    assert [name for name in u.elastic_loaded_fields if name.startswith("_elastic")] == []
+
+
+def test_loaded_fields_mutation_does_not_change_state():
+    """
+    Властивість віддає копію, тому зміна отриманого набору не може зробити так, щоб `elastic_is_loaded` брехав.
+    """
+    u = UserSlim.elastic_create({"email": "a@b.com", "created": {"at": "t", "by": "s"}}, validate=False)
+    assert u.elastic_is_loaded("email") is True
+
+    u.elastic_loaded_fields.discard("email")
+
+    assert u.elastic_is_loaded("email") is True
+
+
+def test_loaded_fields_keep_data_keys_including_underscore_with_extra_allow():
+    """
+    Фільтр службових імен не зачіпає ключів, що прийшли в даних: усередині конструктора набір наповнює
+    цикл по `model_dump()`, а не `__setattr__`. Ключ із підкресленням у даних є завантаженими даними,
+    а не приватним атрибутом, тому лишається в переліку.
+    """
+    class UAllow(ElasticModel):
+        model_config = ConfigDict(extra='allow')
+        a: int
+
+    u = UAllow.elastic_create({"a": 1, "plain": 2, "_under": 3}, validate=False)
+
+    loaded = u.elastic_loaded_fields
+    assert "plain" in loaded
+    assert "_under" in loaded
+
+
+# --------------------------
+# Публічний контракт: ключі конфігу для мапінгу аліасів
+# --------------------------
+
+@pytest.mark.parametrize(
+    "config, alias_is_mapped",
+    [
+        (ConfigDict(populate_by_name=True), True),
+        (ConfigDict(validate_by_name=True), True),
+        (ConfigDict(), False),
+    ],
+    ids=["old-key", "current-key", "no-key"],
+)
+def test_alias_mapping_reads_both_config_keys(config, alias_is_mapped):
+    """
+    Мапінг аліасів має працювати і зі старим ключем конфігу, і з актуальним `validate_by_name`.
+    Без жодного ключа поведінка лишається колишньою: значення за аліасом не мапиться на поле,
+    а потрапляє у сховище невідомих полів, тому доступ за іменем поля падає.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    class AliasModel(ElasticModel):
+        model_config = config
+        id: str = Field(alias="_id")
+
+    m = AliasModel.elastic_create({"_id": "x-1"}, validate=False)
+
+    if alias_is_mapped:
+        assert m.id == "x-1"
+    else:
+        assert m.elastic_extra["_id"] == "x-1"
+        with pytest.raises(NotLoadedFieldError):
+            _ = m.id
+
+
+# --------------------------
+# Публічний контракт: README як джерело підпису конструктора
+# --------------------------
+
+def test_readme_documents_actual_constructor_parameters():
+    """
+    Підпис конструктора в README звіряється з фактичним підписом коду.
+
+    Тест читає саме README, а не жорстко вписаний перелік імен: інакше він ловив би розходження між кодом
+    і тестом, а не між кодом і документацією — тобто пропустив би рівно той дефект, який уже стався.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    readme_text = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+
+    signature_match = re.search(r"`ElasticModel\.elastic_create\((.*?)\)\s*->", readme_text)
+    assert signature_match, "У README немає рядка з підписом `ElasticModel.elastic_create(...) -> ...`"
+
+    # Відкидаємо маркер keyword-only (`*`) і залишаємо лише імена параметрів.
+    documented_params = {part.split(":")[0].strip().lstrip("*").strip() for part in signature_match.group(1).split(",")}
+    documented_params.discard("")
+
+    actual_params = set(inspect.signature(ElasticModel.elastic_create).parameters)
+
+    assert documented_params == actual_params
+
+
     
