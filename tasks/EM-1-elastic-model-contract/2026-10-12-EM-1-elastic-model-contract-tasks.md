@@ -3,9 +3,9 @@
 ## Relevant Files
 
 - [2026-10-10-EM-1-elastic-model-contract-prd.md](./2026-10-10-EM-1-elastic-model-contract-prd.md)
-  :: EM-1 - Product Requirements Document, 26 розбіжностей контракту
+  :: EM-1 - Product Requirements Document, 39 розбіжностей контракту
 - [2026-10-11-EM-1-elastic-model-contract-tech-design.md](./2026-10-11-EM-1-elastic-model-contract-tech-design.md)
-  :: EM-1 - Technical Design, механізм перехоплення та 13 компонентів
+  :: EM-1 - Technical Design, механізм перехоплення та 19 компонентів
 - [2026-10-12-EM-1-test-plan.md](./2026-10-12-EM-1-test-plan.md)
   :: EM-1 - Test Plan, джерело теґів `[verify: ...]` для цього списку
 - [gostmodels/elastic_model.py](../../gostmodels/elastic_model.py)
@@ -13,12 +13,18 @@
   `__getattr__`, фільтр у `__setattr__:399-406`, копія у властивості
   `:321-323`, умова аліасів `:251`, імпорт `Self` `:43`. З 2026-10-14:
   таблиця вхідних ключів, after-валідатор обліку, копія `elastic_extra`,
-  параметри у вкладених моделях, рантайм-імпорт `Self`
+  параметри у вкладених моделях, рантайм-імпорт `Self`. З 2026-10-15:
+  облік зі стану pydantic замість after-валідатора, payload перевірки з
+  поточного стану, адаптер поля з `FieldInfo` і конфігом, правила
+  `validation_alias`, паритет `model_extra`
 - [gostmodels/__init__.py](../../gostmodels/__init__.py)
   :: Публічний експорт пакета. Додається реекспорт класу помилки
 - [README.md](../../README.md)
   :: Фактичний публічний контракт пакета на PyPI. Дванадцять місць правок,
   два приклади переводяться у формат doctest
+- [CHANGELOG.md](../../CHANGELOG.md)
+  :: Release notes 0.3.0, окремий запис на кожну історію EM-1 у порядку
+  виконання (на вимогу автора 2026-10-17)
 - [pyproject.toml](../../pyproject.toml)
   :: Метадані пакета. Додаються `dependencies`, блок налаштувань pytest,
   піднімається версія до 0.3.0
@@ -52,6 +58,14 @@
   Порядок 8.0-12.0 задають залежності: README (12.0) описує вже
   реалізовану поведінку. Історія 13.0 повторює перевірки 7.0 на новому
   коді й мусить бути останньою.
+- Історії 14.0-20.0 (2026-10-15) виправляють знахідки другого код-рев'ю
+  та аудиту відповідності `BaseModel`. Порядок задають залежності: 14.0
+  першою, бо на обліку зі стану pydantic тримаються решта; 15.0 перед
+  16.0, бо без нового payload ключ із `model_extra` заповнив би поле;
+  README (19.0) після коду; 20.0 остання.
+- Тест поведінки, що має збігатися з pydantic, порівнює результат із тим
+  самим класом на `BaseModel`, а не з вписаним вручну очікуванням
+  (`CLAUDE.md`). Номери тестів у дужках - рядки test-plan.
 
 ## Tasks
 
@@ -311,143 +325,463 @@
         проходить, і в колесі лише два модулі пакета та метадані
         [live] (2026-10-13)
 
-- [ ] 8.0 **User Story:** Як розробник, що переводить модель з `BaseModel`
+- [X] 8.0 **User Story:** Як розробник, що переводить модель з `BaseModel`
   на `ElasticModel`, я хочу щоб вхідні ключі за аліасом і за іменем поля
   приймалися за тими самими правилами конфігу, що й у pydantic, щоб
-  заміна базового класу не втрачала дані [0/10]
-  - [ ] 8.1 Замінити тест `test_alias_mapping_reads_both_config_keys`
+  заміна базового класу не втрачала дані [10/10]
+  - [X] 8.1 Замінити тест `test_alias_mapping_reads_both_config_keys`
     (`tests/test_elastic_model.py:718-746`) параметризованою матрицею:
     4 конфіги (без ключів, `validate_by_name`, `populate_by_name`,
     `validate_by_name` + `validate_by_alias=False`) × вхідний ключ `'_id'`
     / `'id'`. Еталон - клас на `BaseModel` із тим самим полем і конфігом.
     Очікувано червоний у 3 випадках із 8 [verify: auto-test]
-  - [ ] 8.2 Написати тест: поле з аліасом і дефолтом, без ключів конфігу,
+      → `test_alias_rules_match_pydantic`, 8 випадків; червоні рівно три
+        передбачені (`no-keys` × 2, `name-only-_id`) [live] (2026-10-14)
+  - [X] 8.2 Написати тест: поле з аліасом і дефолтом, без ключів конфігу,
     дані за іменем поля - `elastic_is_loaded` дає `False`, значення в
     `elastic_extra` [verify: auto-test]
-  - [ ] 8.3 Написати тест: при `validate_by_name=True` і обох ключах у
+      → `test_forbidden_key_does_not_fill_field_with_default`; до 8.6
+        червоний: заборонений ключ заповнював поле [live] (2026-10-14)
+  - [X] 8.3 Написати тест: при `validate_by_name=True` і обох ключах у
     даних виграє аліас за обох порядків, програшний ключ - в
     `elastic_extra` [verify: auto-test]
-  - [ ] 8.4 Написати тест: модель без ключів конфігу, побудована за
+      → `test_alias_wins_over_field_name`, 2 порядки; до 8.6 червоний:
+        вигравав останній ключ, програшний губився [live] (2026-10-14)
+  - [X] 8.4 Написати тест: модель без ключів конфігу, побудована за
     аліасом - `elastic_is_valid()` дає `(True, [])`,
     `elastic_get_validated_model()` без помилки [verify: auto-test]
-  - [ ] 8.5 Реалізувати модульний помічник таблиці вхідних ключів:
+      → `test_validation_methods_agree_for_model_built_by_alias`, обидва
+        режими `recursive`; до 8.7 червоний [live] (2026-10-14)
+  - [X] 8.5 Реалізувати модульний помічник таблиці вхідних ключів:
     незмінний датаклас (таблиця «ключ → поле» як `MappingProxyType` +
     перелік усіх імен і аліасів полів), кеш за класом. Правила - компонент
     4 технічного дизайну [verify: auto-test]
-  - [ ] 8.6 Застосувати таблицю в `elastic_create`
+      → `_InputKeyMap` з методом `filling_keys` (вибір ключа-переможця)
+        і фабрика `_input_key_map`; доведено тестами 8.1-8.3 після 8.6
+        [live] (2026-10-14)
+  - [X] 8.6 Застосувати таблицю в `elastic_create`
     (`gostmodels/elastic_model.py:265-306`): аліас виграє в імені; кожен
     ключ, що не заповнив поле, - в `elastic_extra`; у `model_construct` -
     лише заповнені поля та справді невідомі ключі; у перелік
     завантажених - лише вони ж [verify: auto-test]
-  - [ ] 8.7 Винести спільний приватний метод валідації з `by_alias=False,
+      → 52 passed, 1 failed: червоним лишився тільки 8.4 з причини,
+        яку закриває 8.7 (`(False, ['_id'])` від валідації без
+        `by_name`) [live] (2026-10-14)
+  - [X] 8.7 Винести спільний приватний метод валідації з `by_alias=False,
     by_name=True` і викликати його з `elastic_is_valid` та
     `elastic_get_validated_model` (`:357-396`) [verify: auto-test]
-  - [ ] 8.8 Написати тест: матриця з 8.1 для `BaseModel`, вкладеного в
+      → `_elastic_validate`; 53 passed, 0 failed. Побічно шляхи помилок
+        `elastic_is_valid` стали іменами полів замість аліасів - внесено
+        в PRD FR-4, tech-design і 12.3 [live] (2026-10-14)
+  - [X] 8.8 Написати тест: матриця з 8.1 для `BaseModel`, вкладеного в
     `ElasticModel`, при `validate=False` [verify: auto-test]
-  - [ ] 8.9 Застосувати таблицю у вкладеному `BaseModel` при
+      → `test_nested_basemodel_alias_rules_match_pydantic`, 8 випадків;
+        до 8.9 червоні два, де код приймав ключ, який pydantic відкидає
+        [live] (2026-10-14)
+  - [X] 8.9 Застосувати таблицю у вкладеному `BaseModel` при
     `validate=False` (`:490-495`): ключ, що не заповнив поле, але збігається
     з ім'ям чи аліасом поля, відкидається [verify: auto-test]
-  - [ ] 8.10 Прогнати повний набір: 0 failed, 29 початкових тестів
+      → 8 випадків 8.8 зелені [live] (2026-10-14)
+  - [X] 8.10 Прогнати повний набір: 0 failed, 29 початкових тестів
     зелені без змін [verify: auto-test]
+      → 61 passed, 0 failed; у тестах змінено лише тест, доданий самою
+        EM-1, `tests/test_basemodel_shallow_prebuild.py` не чіпався
+        [live] (2026-10-14)
 
-- [ ] 9.0 **User Story:** Як розробник, що читає перелік завантажених
+- [X] 9.0 **User Story:** Як розробник, що читає перелік завантажених
   полів і сховище невідомих полів, я хочу щоб вони не давали зіпсувати
   модель і були правдиві незалежно від способу її створення, щоб
-  покладатися на `elastic_is_loaded` і після повної перевірки моделі [0/8]
-  - [ ] 9.1 Написати тест: `clear()` і запис у повернутий словник
+  покладатися на `elastic_is_loaded` і після повної перевірки моделі [8/8]
+  - [X] 9.1 Написати тест: `clear()` і запис у повернутий словник
     `elastic_extra` не змінюють модель [verify: auto-test]
-  - [ ] 9.2 Написати тест: `elastic_get_validated_model(recursive=True)` і
+      → `test_elastic_extra_mutation_does_not_change_model`; до 9.4
+        червоний: зміна копії змінювала модель [live] (2026-10-14)
+  - [X] 9.2 Написати тест: `elastic_get_validated_model(recursive=True)` і
     звичайний конструктор - перелік верхнього рівня та вкладеної моделі
     дорівнює полям із вхідних даних; присвоєння після створення додає ім'я
     до переліку [verify: auto-test]
-  - [ ] 9.3 Написати тест: після `del src.nested.field` виклик
+      → `test_models_created_by_validation_know_loaded_fields`; до 9.5
+        червоний: перелік порожній [live] (2026-10-14)
+  - [X] 9.3 Написати тест: після `del src.nested.field` виклик
     `elastic_is_valid(recursive=False)` лишає перелік вкладеної моделі без
     цього поля. До реалізації 9.5 він зелений: охороняє від регресії, яку
     перевіряє 9.6 [verify: auto-test]
-  - [ ] 9.4 Реалізувати поверхневу копію у властивості `elastic_extra`
+      → `test_shallow_validation_does_not_change_source_loaded_fields`,
+        зелений до 9.5, як і передбачено [live] (2026-10-14)
+  - [X] 9.4 Реалізувати поверхневу копію у властивості `elastic_extra`
     (`:335-340`); у докстрінгу - що вкладені значення спільні з моделлю
     [verify: auto-test]
-  - [ ] 9.5 Реалізувати after-валідатор обліку на `ElasticModel`: модель,
+      → 9.1 зелений [live] (2026-10-14)
+  - [X] 9.5 Реалізувати after-валідатор обліку на `ElasticModel`: модель,
     що вже відстежується, повертається без змін; інакше перелік =
     `model_fields_set` ∪ ключі `model_extra`, прапорець завершення
     виставляється. Компонент 9 технічного дизайну [verify: auto-test]
-  - [ ] 9.6 Негативна перевірка: тимчасово прибрати перевірку «модель уже
+      → `_elastic_track_validated`; 9.2 і 9.3 зелені [live] (2026-10-14)
+  - [X] 9.6 Негативна перевірка: тимчасово прибрати перевірку «модель уже
     відстежується», підтвердити, що 9.3 падає, повернути назад
     [verify: manual-run-claude]
-  - [ ] 9.7 `elastic_is_loaded` перевіряє внутрішній набір напряму, без
+      → без перевірки 9.3 падає з `{'at', 'by'} != {'at'}` (видалене поле
+        повертається в облік джерела); після відновлення 64 passed
+        [live] (2026-10-14)
+  - [X] 9.7 `elastic_is_loaded` перевіряє внутрішній набір напряму, без
     копії (`:351-355`); наявні тести на `elastic_is_loaded` зелені
     [verify: auto-test]
-  - [ ] 9.8 Прогнати повний набір: 0 failed [verify: auto-test]
+      → наявні тести зелені; докстрінг оновлено під нові шляхи
+        створення моделі [live] (2026-10-14)
+  - [X] 9.8 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 64 passed, 0 failed; ті самі 13 попереджень серіалізатора, що до
+        змін [live] (2026-10-14)
 
-- [ ] 10.0 **User Story:** Як розробник, що будує модель із вкладеними
+- [X] 10.0 **User Story:** Як розробник, що будує модель із вкладеними
   моделями, я хочу щоб параметри головного конструктора діяли на всіх
   рівнях вкладеності, щоб `defaults` і `strict_validate` давали для
-  вкладеної моделі той самий результат, що й для зовнішньої [0/4]
-  - [ ] 10.1 Написати тест: `elastic_create(..., defaults=True)` - дефолтне
+  вкладеної моделі той самий результат, що й для зовнішньої [4/4]
+  - [X] 10.1 Написати тест: `elastic_create(..., defaults=True)` - дефолтне
     поле вкладеної моделі та елемента списку читається, а
     `elastic_is_loaded` для нього `False` [verify: auto-test]
-  - [ ] 10.2 Написати тест: рядок `"5"` у полі `int` вкладеної моделі при
+      → `test_defaults_reach_nested_models`; до 10.3 червоний з
+        `NotLoadedFieldError` на вкладеному дефолті [live] (2026-10-14)
+  - [X] 10.2 Написати тест: рядок `"5"` у полі `int` вкладеної моделі при
     `strict_validate=True` дає `ValidationError`, без прапорця - коерситься
     в `5` [verify: auto-test]
-  - [ ] 10.3 Передати `defaults` і `strict_validate` через
+      → `test_strict_validate_reaches_nested_models`; до 10.3 червоний:
+        суворий режим не доходив до вкладеної моделі [live] (2026-10-14)
+  - [X] 10.3 Передати `defaults` і `strict_validate` через
     `_elastic_prepare_value` і `_elastic_coerce_value` у рекурсію та у
     виклик `elastic_create` вкладеної моделі (`:482`); обидва параметри
     типово `False` [verify: auto-test]
-  - [ ] 10.4 Прогнати повний набір: 0 failed [verify: auto-test]
+      → передано в усі сім гілок рекурсії; 10.1 і 10.2 зелені
+        [live] (2026-10-14)
+  - [X] 10.4 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 66 passed, 0 failed [live] (2026-10-14)
 
-- [ ] 11.0 **User Story:** Як розробник, чиї інструменти читають анотації
+- [X] 11.0 **User Story:** Як розробник, чиї інструменти читають анотації
   в рантаймі, я хочу щоб анотації публічних методів розв'язувалися на всіх
   оголошених версіях Python, щоб сумісність із 3.10 не ламала
-  інтроспекцію [0/5]
-  - [ ] 11.1 Написати тест: `typing.get_type_hints` для `elastic_create` і
+  інтроспекцію [5/5]
+  - [X] 11.1 Написати тест: `typing.get_type_hints` для `elastic_create` і
     `elastic_get_validated_model` без помилки, повернення - `Self`
     [verify: auto-test]
-  - [ ] 11.2 Замінити блок `TYPE_CHECKING` (`:45-48`) рантайм-імпортом
+      → `test_public_method_annotations_resolve_at_runtime`; до 11.2
+        червоний з `NameError: name 'Self'` [live] (2026-10-14)
+  - [X] 11.2 Замінити блок `TYPE_CHECKING` (`:45-48`) рантайм-імпортом
     `from typing_extensions import Self`, оновивши коментар-пояснення
     [verify: auto-test]
-  - [ ] 11.3 Додати `typing-extensions>=4.12.2` у `dependencies`
+      → 11.1 зелений; 67 passed [live] (2026-10-14)
+  - [X] 11.3 Додати `typing-extensions>=4.12.2` у `dependencies`
     `pyproject.toml` з коментарем, чому саме ця межа [verify: code-only]
-  - [ ] 11.4 Написати тест: розбір документованого підпису з анотацією
+  - [X] 11.4 Написати тест: розбір документованого підпису з анотацією
     `dict[str, Any]` дає правильні імена параметрів [verify: auto-test]
-  - [ ] 11.5 Перевести розбір підпису README в тесті 5.1
+      → `test_documented_param_names_handles_generic_annotations`
+        [live] (2026-10-14)
+  - [X] 11.5 Перевести розбір підпису README в тесті 5.1
     (`tests/test_elastic_model.py:753-775`) на `ast` через спільний
     помічник, який перевіряє 11.4 [verify: auto-test]
+      → помічник `_documented_param_names`; 68 passed, 0 failed
+        [live] (2026-10-14)
 
-- [ ] 12.0 **User Story:** Як розробник, що читає README, я хочу щоб він
+- [X] 12.0 **User Story:** Як розробник, що читає README, я хочу щоб він
   описував правила аліасів, облік завантажених полів і дію параметрів
   такими, якими їх зробили історії 8.0-11.0, щоб опис не відставав від
-  коду [0/5]
-  - [ ] 12.1 Прибрати `validate_by_name=True` і коментар про нього з класу
+  коду [5/5]
+  - [X] 12.1 Прибрати `validate_by_name=True` і коментар про нього з класу
     `User` у першому прикладі; doctest лишається зеленим без ключа конфігу
     [verify: auto-test]
-  - [ ] 12.2 Переписати пункт про аліаси в розділі «Defaults and config»:
+      → README-doctest зелений без ключа; невикористаний імпорт
+        `ConfigDict` з прикладу теж прибрано [live] (2026-10-14)
+  - [X] 12.2 Переписати пункт про аліаси в розділі «Defaults and config»:
     аліас приймається типово; ім'я аліасованого поля - з `validate_by_name`
     або `populate_by_name`; `validate_by_alias=False` забороняє аліас;
     ключ, що не заповнив поле, потрапляє в `elastic_extra`
     [verify: code-only]
-  - [ ] 12.3 Доповнити опис API: `elastic_extra` віддає поверхневу копію;
+      → окремий абзац про вкладений `BaseModel`: сховища невідомих полів
+        у нього немає, тому такий ключ відкидається
+  - [X] 12.3 Доповнити опис API: `elastic_extra` віддає поверхневу копію;
     модель, створена валідацією, вважає завантаженими поля з вхідних даних
     валідації, тож дефолт, заповнений у вихідній моделі, у копії з
-    `elastic_get_validated_model` рахується завантаженим [verify: code-only]
-  - [ ] 12.4 Доповнити опис `defaults` і `strict_validate`: обидва діють на
+    `elastic_get_validated_model` рахується завантаженим; шляхи помилок
+    `elastic_is_valid` використовують імена полів, а не аліаси
+    [verify: code-only]
+  - [X] 12.4 Доповнити опис `defaults` і `strict_validate`: обидва діють на
     вкладені `ElasticModel` [verify: code-only]
-  - [ ] 12.5 Перенести рядки коментарів по межах речень у
+      → `strict_validate` у «Key features» до цього не був описаний
+        взагалі; додано і його суть, і дію на вкладені моделі
+  - [X] 12.5 Перенести рядки коментарів по межах речень у
     `gostmodels/elastic_model.py:445-446` і в коментарях `pyproject.toml`
     [verify: code-only]
 
-- [ ] 13.0 **User Story:** Як користувач пакета, я хочу отримати
+- [X] 13.0 **User Story:** Як користувач пакета, я хочу отримати
   виправлення за код-рев'ю тим самим перевіреним релізом 0.3.0, щоб межі
   сумісності були підтверджені на остаточному коді, а не на попередньому
-  [0/5]
-  - [ ] 13.1 Прогнати повний набір на Python 3.13 і pydantic 2.11.x: 0
+  [5/5]
+  - [X] 13.1 Прогнати повний набір на Python 3.13 і pydantic 2.11.x: 0
     failed [verify: auto-test]
-  - [ ] 13.2 Прогнати набір на `cpython-3.10.20` через `uv`, включно з
+      → 68 passed, 13 попереджень серіалізатора, як до змін; Python
+        3.13.16, pydantic 2.11.7 [live] (2026-10-14)
+  - [X] 13.2 Прогнати набір на `cpython-3.10.20` через `uv`, включно з
     тестом 11.1. Якщо падає з іншої причини - винести автору рішення про
     `requires-python`, не вирішувати самостійно [verify: manual-run-claude]
-  - [ ] 13.3 Зібрати колесо, встановити в порожнє оточення без
+      → 68 passed; інтерпретатор підтверджено окремо: 3.10.20 без
+        `typing.Self` [live] (2026-10-14)
+  - [X] 13.3 Зібрати колесо, встановити в порожнє оточення без
     `requirements.txt`: імпорт успішний, `typing-extensions` і pydantic
     підтягнулися за оголошеними залежностями [verify: manual-run-claude]
-  - [ ] 13.4 Пройти чекліст із дванадцяти місць README за FR-7 PRD
+      → метадані колеса містять обидві залежності; в ізольованому
+        оточенні 3.10 імпорт іде з колеса, `get_type_hints` дає
+        `typing_extensions.Self`. Резолвер поставив pydantic 2.14.1, тому
+        набір додатково прогнано й на ньому: 68 passed. Каталог `build/`,
+        що лишила збірка, видалено [live] (2026-10-14)
+  - [X] 13.4 Пройти чекліст із дванадцяти місць README за FR-7 PRD
     [verify: code-only]
-  - [ ] 13.5 Фінальний прогін повного набору перед збіркою: 0 failed
+      → 12 з 12
+  - [X] 13.5 Фінальний прогін повного набору перед збіркою: 0 failed
     [verify: auto-test]
+      → 68 passed, 0 failed [live] (2026-10-14)
+
+- [X] 14.0 **User Story:** Як розробник, чий код написаний під `BaseModel`,
+  я хочу щоб модель зі звичайного шляху pydantic поводилася як `BaseModel`,
+  а облік завантажених полів не розходився з її станом, щоб перехід на
+  `ElasticModel` не змінював результатів коду, який уже працює [10/10]
+  - [X] 14.1 Написати тест (8.1): `==` на парах моделей - конструктор з
+    явним і дефолтним значенням, `model_construct` проти конструктора,
+    frozen, `model_copy()` - дорівнює результату для того самого класу на
+    `BaseModel`. Очікувано червоний [verify: auto-test]
+      → `test_equality_matches_pydantic`, 6 пар; червоні 5, зелена лише
+        `different-data`, де моделі нерівні й у pydantic [live] (2026-10-16)
+  - [X] 14.2 Написати тест (8.2): облік після поверхневої копії з
+    присвоєнням у копії, `model_copy(update=...)`, `model_construct(x=1)`
+    і присвоєння через сетер `@property` [verify: auto-test]
+      → `test_loaded_fields_follow_model_state_after_copies_and_special_paths`;
+        червоний: копія позначила поле завантаженим в оригіналі
+        [live] (2026-10-16)
+  - [X] 14.3 Написати тест (8.3): `loc` і `type` помилок
+    `TypeAdapter(Optional[N])` збігаються з `BaseModel` з точністю до
+    імені класу [verify: auto-test]
+      → `test_nested_model_validation_errors_match_pydantic` на
+        `Union[Leaf, int]`, порівнює ще й заголовок; червоний:
+        `union[function-after[_elastic_track_validated(), Leaf],int]`
+        [live] (2026-10-16)
+  - [X] 14.4 Написати тест (8.6): `elastic_create` на моделі з
+    `serialize_by_alias=True` дає ті самі дані, що `model_validate`
+    [verify: auto-test]
+      → `test_elastic_create_with_serialize_by_alias_matches_pydantic`,
+        перевіряє ще й облік; червоний з `AttributeError: _id`. Перша
+        версія з `defaults=True` була зеленою, бо обходила `delattr`, хоча
+        облік і там хибний, - тест посилено [live] (2026-10-16)
+  - [X] 14.5 Написати тест (9.3): frozen-модель з дефолтним полем
+    будується при `defaults=False`, дефолт не завантажений
+    [verify: auto-test]
+      → `test_elastic_create_on_frozen_model`; червоний з
+        `Instance is frozen` [live] (2026-10-16)
+  - [X] 14.6 Написати тест (5.8): моделі з `elastic_create` з різним
+    `elastic_extra` нерівні; модель з `elastic_create` без невідомих
+    ключів дорівнює моделі з конструктора з тими самими даними
+    [verify: auto-test]
+      → `test_equality_counts_elastic_extra`; зелений до реалізації:
+        охороняє поведінку, яку зберігає рефакторинг 14.7 [live] (2026-10-16)
+  - [X] 14.7 Реалізувати помічник обліку зі стану pydantic і перевести на
+    нього `elastic_loaded_fields` та `elastic_is_loaded`; прибрати
+    `_elastic_loaded_fields`, `_elastic_finished`, `_elastic_track_validated`,
+    `__setattr__` і `__delattr__`. Компонент 14 технічного дизайну
+    [verify: auto-test]
+      → помічник `_elastic_field_loaded`; 14.1-14.3 зелені. Докстрінг
+        `elastic_create`, що називав видалений `_elastic_loaded_fields`,
+        виправлено на публічну властивість [live] (2026-10-16)
+  - [X] 14.8 Переписати хвіст `elastic_create`: без проходу `model_dump()`;
+    незавантажені дефолти при `defaults=False` - поля поза
+    `model_fields_set` - прибираються з `__dict__` напряму, без `delattr`
+    [verify: auto-test]
+      → 14.4 і 14.5 зелені; попереджень серіалізатора 8 замість 13, бо
+        `elastic_create` більше не серіалізує модель [live] (2026-10-16)
+  - [X] 14.9 Наявні тести обліку (5.1-5.6 test-plan, тести дефолтів) зелені
+    без змін [verify: auto-test]
+      → зелені; змінено лише чотири докстрінги, що описували прибрані
+        механізми [live] (2026-10-16)
+  - [X] 14.10 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 79 passed, 0 failed [live] (2026-10-16)
+
+- [X] 15.0 **User Story:** Як розробник, що перевіряє модель, я хочу щоб
+  перевірка брала payload з поточного стану моделі й переносила в копію
+  те, чого payload нести не може, щоб вона не підміняла значень полів, не
+  відкидала валідну модель і не губила `elastic_extra` [6/6]
+  - [X] 15.1 Написати тест (8.4): значення поля й `model_extra` копії
+    збігаються з `model_validate`; після `del` поля `elastic_is_valid()`
+    дає `(False, ['uid'])` [verify: auto-test]
+      → `test_validation_does_not_take_field_value_from_model_extra`, обидва
+        режими; червоний: копія мала `uid == 'FAKE'`, а після `del` -
+        `(True, [])` [live] (2026-10-16)
+  - [X] 15.2 Написати тест (8.5): `serialize_by_alias`, `Field(exclude=True)`,
+    `@field_serializer`, `@computed_field` при `extra='forbid'` - глибока
+    перевірка валідної моделі дає `(True, [])` [verify: auto-test]
+      → `test_deep_validation_ignores_serialization_settings`, 4 випадки;
+        усі червоні з хибним шляхом (`uid`, `secret`, `n`, `area`)
+        [live] (2026-10-16)
+  - [X] 15.3 Написати тест (5.7): `elastic_extra` верхнього й вкладеного
+    рівня в копії в обох режимах `recursive`; валідна модель дорівнює
+    своїй копії [verify: auto-test]
+      → `test_validated_copy_keeps_elastic_extra`, з елементом списку;
+        червоний: у копії `{}` [live] (2026-10-16)
+  - [X] 15.4 Реалізувати payload з поточного стану моделі замість
+    `_build_validation_payload`. Компонент 15 технічного дизайну
+    [verify: auto-test]
+      → `_build_validation_payload` переписано без `model_dump()`, обхід
+        вкладених значень - `_build_validation_value`; 15.2 зелений
+        [live] (2026-10-16)
+  - [X] 15.5 Реалізувати перенесення `elastic_extra` і ключів
+    `model_extra` з іменами полів у копію `elastic_get_validated_model`
+    [verify: auto-test]
+      → `_carry_state_to_validated`; 15.1 і 15.3 зелені [live] (2026-10-16)
+  - [X] 15.6 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 87 passed, 0 failed; попереджень серіалізатора 1 замість 8, бо
+        глибока перевірка більше не серіалізує модель [live] (2026-10-16)
+
+- [X] 16.0 **User Story:** Як розробник, чия модель має `extra='allow'`, я
+  хочу щоб ключ, що не заповнив поле, потрапляв і в `model_extra`, як у
+  pydantic, щоб модель після переходу мала той самий `model_extra` [4/4]
+  - [X] 16.1 Написати тест (8.7): заборонене ім'я, заборонений аліас і
+    ім'я, що програло аліасу, для `ElasticModel` і вкладеного `BaseModel`
+    при `validate=False` - `model_extra` збігається з pydantic, поле з тим
+    самим іменем не завантажене [verify: auto-test]
+      → `test_unfilled_key_lands_in_model_extra_as_in_pydantic` і
+        `test_nested_basemodel_unfilled_key_lands_in_model_extra_as_in_pydantic`,
+        по 3 випадки; до 16.3 усі 6 червоні на `model_extra` [live] (2026-10-16)
+  - [X] 16.2 Написати тест (5.9): при `extra='forbid'` невідомий ключ
+    потрапляє в `elastic_extra` без помилки. Зелений одразу: закріплює
+    наявну поведінку, яку автор визнав розширенням [verify: auto-test]
+      → наявний тест `elastic_extra` параметризовано за `extra`
+        (`ignore`/`allow`/`forbid`); 3 passed [live] (2026-10-16)
+  - [X] 16.3 Реалізувати дописування таких ключів у `__pydantic_extra__`
+    в `elastic_create` і у вкладеному `BaseModel` при `validate=False`.
+    Компонент 18 технічного дизайну [verify: auto-test]
+      → `_put_unfilled_keys_into_model_extra` збирає `model_extra` з усіх
+        ключів, що не заповнили поле, у порядку вхідних даних; проба: порядок
+        ключів і `model_dump_json()` збігаються з pydantic [live] (2026-10-16)
+  - [X] 16.4 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 95 passed, 0 failed [live] (2026-10-16)
+
+- [X] 17.0 **User Story:** Як розробник, що будує модель через
+  `elastic_create(validate=True)`, я хочу щоб кожне значення валідувалося
+  за правилами поля pydantic, щоб невалідні дані не проходили мовчки [6/6]
+  - [X] 17.1 Написати тест (9.1): дев'ять сценаріїв - `elastic_create` дає
+    той самий `model_dump()` або ту саму відмову, що `model_validate`
+    [verify: auto-test]
+      → `test_elastic_create_validates_values_by_field_rules_as_pydantic`;
+        до 17.3 усі 9 червоні [live] (2026-10-16)
+  - [X] 17.2 Написати тест (9.2): локальні класи з анотацією-рядком
+    [verify: auto-test]
+      → `test_local_classes_with_string_annotation_match_pydantic`; до 17.3
+        `NameError` [live] (2026-10-16)
+  - [X] 17.3 Реалізувати адаптер поля з `FieldInfo` і конфігом моделі з
+    кешем за парою «клас, поле»; анотацію для аналізу структури брати з
+    `model_fields`; передавати `strict=None` замість `False`. Компонент 16
+    технічного дизайну [verify: auto-test]
+      → `_field_adapter` з типом `Annotated[field.annotation, *metadata,
+        Field(discriminator=...)]`: без дискримінатора розходяться помилки, а
+        весь `FieldInfo` дає попередження на pydantic 2.14 (виявлено в 20.2);
+        вкладені часткові моделі проходять адаптер без змін, зокрема при
+        `revalidate_instances='always'` у зовнішньому конфігу [live] (2026-10-17)
+  - [X] 17.4 Реалізувати валідацію дефолту з `validate_default` при
+    `defaults=True` [verify: auto-test]
+      → `_validate_constructed_defaults`; дефолти валідуються за тієї самої
+        умови, що й значення (`validate or strict_validate`); сценарій
+        `validate_default` зелений [live] (2026-10-17)
+  - [X] 17.5 Прибрати `_raw_annotations_map` і кеш адаптерів за анотацією,
+    якщо в них не лишилося викликів [verify: code-only]
+      → прибрано `_raw_annotations_map`, `_adapter`, `_adapter_hashable` та
+        імпорт `get_type_hints`
+  - [X] 17.6 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 105 passed, 0 failed [live] (2026-10-17)
+
+- [X] 18.0 **User Story:** Як розробник, чия модель має `validation_alias`,
+  я хочу щоб такий ключ не заповнював поле в обхід валідації, а ім'я та
+  `alias` приймалися за правилами pydantic, щоб `elastic_create` не
+  пропускав неперевірених значень [4/4]
+  - [X] 18.1 Перевірити пробою, що pydantic копіює `alias` у
+    `validation_alias`, коли той не заданий; записати результат у таблицю
+    властивостей технічного дизайну [verify: manual-run-claude]
+      → `Field(alias='_a')` дає `validation_alias == '_a'`; інший
+        `validation_alias` дає лише явний `Field(...)` або `AliasGenerator`;
+        записано в таблицю 2026-10-16/17 [live] (2026-10-17)
+  - [X] 18.2 Написати тест (9.4): матриця полів з `validation_alias` ×
+    ключі × конфіги [verify: auto-test]
+      → `test_validation_alias_field_key_rules_match_pydantic` (4 поля × 4
+        конфіги × 2 ключі) і `test_validation_alias_key_does_not_fill_field`
+        (5 випадків × `defaults`); до 18.3 червоні 20 з 42 [live] (2026-10-17)
+  - [X] 18.3 Реалізувати правила `validation_alias` у таблиці ключів.
+    Компонент 17 технічного дизайну [verify: auto-test]
+      → гілка «власний `validation_alias`» в `_input_key_map` і
+        `_validation_alias_keys`; проба: 15 комбінацій поле × конфіг
+        збігаються з pydantic, `elastic_is_valid` і копія після перевірки
+        працюють [live] (2026-10-17)
+  - [X] 18.4 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 147 passed, 0 failed [live] (2026-10-17)
+
+- [X] 19.0 **User Story:** Як розробник, що читає README, я хочу щоб він
+  описував розширення й межі `elastic_create`, щоб знати, де
+  `ElasticModel` свідомо відрізняється від `BaseModel` [3/3]
+  - [X] 19.1 Проба (R.3): `@computed_field` через `elastic_create`. За
+    результатом оновити README і Out of Scope PRD, а якщо працює -
+    додати тест [verify: manual-run-claude]
+      → модель будується, зокрема з частковими даними; обчислюване поле
+        над незавантаженим полем і `model_dump()` дають `NotLoadedFieldError`.
+        Виняток прибрано з README і Out of Scope PRD, додано
+        `test_elastic_create_supports_computed_field` [live] (2026-10-17)
+  - [X] 19.2 Описати в README місця 13-20 FR-7 PRD, а також межу обліку
+    для поля, чиє ім'я прийшло забороненим ключем при `extra='allow'`
+    (Out of Scope PRD, 2026-10-16) [verify: code-only]
+      → новий розділ «Differences from BaseModel»; місця 13-20 —
+        `README.md:264,265,237+266,269,270,271,209,253`, межа обліку —
+        `:275`; твердження розділу перевірені пробою перед записом
+  - [X] 19.3 README-doctest зелений [verify: auto-test]
+      → README.md: 1 passed; повний набір 148 passed [live] (2026-10-17)
+
+- [X] 21.0 **User Story:** Як розробник, я хочу щоб бібліотека
+  перевикористовувала механізми pydantic замість власних там, де це не
+  змінює поведінку `BaseModel`, щоб код лишався простим [5/5]
+  - [X] 21.1 Дослідити механізми pydantic для коду бібліотеки (агент у
+    чистому контексті + вибіркові проби в головній сесії)
+    [verify: manual-run-claude]
+      → публічної заміни без зміни звичайного шляху немає; висновки в Prior
+        Art PRD і Trade-offs технічного дизайну [live] (2026-10-17)
+  - [X] 21.2 Спробувати обгортку схеми через `__get_pydantic_core_schema__`
+    для обходу pydantic у `Optional`/`Union` [verify: auto-test]
+      → частково будує, але тести паритету впали: на 2.11.7 ламається
+        `model_validate(by_name=True)`, мітки `Union` у помилках стають
+        `function-wrap[...]`; код відкочено, автор лишив власний обхід
+        [live] (2026-10-18)
+  - [X] 21.3 Видалити мертвий `_SYSTEM_ATTRS` [verify: code-only]
+  - [X] 21.4 Тести (10.2, 10.4): валідатори вкладеної моделі в
+    `elastic_create` — як у pydantic для готового екземпляра в полі;
+    рекурсивна модель `list["Node"]` (пропуск на 3.10); README (FR-7, місце
+    16) уточнено [verify: auto-test]
+      → охоронний тест знайшов, що `wrap`/`after` вкладеної моделі
+        спрацьовують — так само, як у pydantic; README виправлено, тест
+        порівнює з pydantic [live] (2026-10-18)
+  - [X] 21.5 Прогнати повний набір: 0 failed [verify: auto-test]
+      → 150 passed, 0 failed (Python 3.13, pydantic 2.11.7) [live] (2026-10-18)
+
+- [X] 20.0 **User Story:** Як користувач пакета, я хочу отримати ці
+  виправлення тим самим перевіреним релізом 0.3.0, щоб сумісність була
+  підтверджена на остаточному коді [4/4]. Виконується останньою: після
+  21.0 прогони 20.1 і 20.2 повторюються на остаточному коді.
+  - [X] 20.1 Прогнати повний набір на Python 3.13 і pydantic 2.11.x: 0
+    failed [verify: auto-test]
+      → 150 passed, 0 failed (pydantic 2.11.7) [live] (2026-10-18)
+  - [X] 20.2 Прогнати набір на `cpython-3.10.20` і на pydantic 2.14.1
+    через `uv`: 0 failed [verify: manual-run-claude]
+      → 3.13 + 2.14.1: 150 passed; 3.10 + 2.11.7 і 3.10 + 2.14.1: 148 passed,
+        2 skipped (9.2, 10.4 — `list["X"]` на 3.10). Перший прогін (2026-10-17)
+        виявив попередження адаптера на 2.14 (виправлено) і `list["Node"]` на
+        3.10 — автор обрав офіційну підтримку 3.11+ без блокування 3.10
+        [live] (2026-10-18)
+  - [X] 20.3 Прогнати проби аудиту 2026-10-15 на остаточному коді:
+    розходження, які EM-1 виправляє, зникли, решта збігається з Out of
+    Scope PRD [verify: manual-run-claude]
+      → `[DIFF]` 64 → 31: зникли `==`, frozen, ключі конфігу, правила аліасів,
+        обхід `validation_alias`, generic; лишилися читання `validation_alias`,
+        формат помилки `elastic_create`, `validate=False`, `NotLoadedFieldError`
+        і різні імена класів у самій пробі — усе в Out of Scope PRD або
+        свідомі розширення [live] (2026-10-18)
+  - [X] 20.4 Пройти чекліст місць 13-20 FR-7 PRD [verify: code-only]
+      → 8 з 8 у README (рядки в 19.2); додатково — межа обліку, обчислювані
+        поля й рівень підтримки Python
