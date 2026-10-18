@@ -95,7 +95,7 @@ doctest'и вимагають `email-validator` (через `EmailStr` в обо
 |---------|--------|-------|-------------------|
 | 7.1 `defaults` передається у вкладені `ElasticModel`, зокрема в елементи списку | `auto-test` | unit | `elastic_create(..., defaults=True)`: дефолтне поле вкладеної моделі та елемента списку читається, а `elastic_is_loaded` для нього `False` — та сама семантика, що на верхньому рівні. На 2026-10-14 читання дає `NotLoadedFieldError` |
 | 7.2 `strict_validate` передається у вкладені `ElasticModel` | `auto-test` | unit | рядок `"5"` у полі `int` вкладеної моделі при `strict_validate=True` дає `ValidationError`; без прапорця значення коерситься в `5` |
-| 7.3 README описує дію параметрів на вкладені моделі | `code-only` | — | чекліст: опис `defaults` і `strict_validate` згадує вкладені моделі. З 2026-10-15 — разом із межами: не діють на поля `Optional`/`Union`, `strict_validate` не діє всередині вкладеного `BaseModel` при `validate=False` |
+| 7.3 README описує дію параметрів на вкладені моделі | `code-only` | — | чекліст: опис `defaults` і `strict_validate` згадує вкладені моделі. З 2026-10-15 — разом із межами: не діють на поля `Optional`/`Union`. Межу для вкладеного `BaseModel` при `validate=False` знято 2026-10-18 (10.6) |
 
 ### Story 8 — розробник, чий код написаний під `BaseModel` (2026-10-15)
 
@@ -121,6 +121,8 @@ doctest'и вимагають `email-validator` (через `EmailStr` в обо
 | 9.4 Правила ключів для поля з `validation_alias` | `auto-test` | unit | матриця: поле з `alias` і `validation_alias` (рядок, `AliasChoices`, `AliasPath`) × ключі (ім'я, `alias`) × конфіги (типовий, `validate_by_name`): `elastic_create` заповнює поле тоді й лише тоді, коли pydantic приймає цей ключ. Ключ `validation_alias` поля не заповнює й лежить в `elastic_extra`, зокрема при `defaults=True` і невалідному значенні. На 2026-10-15 заповнює без валідації |
 | 10.2 Валідатори класу вкладеної моделі в `elastic_create` (2026-10-18) | `auto-test` | unit | вкладена модель з `@field_validator`, `@model_validator` `before`/`wrap`/`after`: в `elastic_create` викликані ті самі валідатори, що й у `model_validate` з екземпляром з `model_construct` у полі (`wrap`, `after`); на звичайному шляху — ті самі, що в того самого класу на `BaseModel` |
 | 10.4 Рекурсивна модель (2026-10-18) | `auto-test` | unit | `children: list["Node"]`: часткові діти на двох рівнях. На Python 3.10 пропускається (рівень підтримки, FR-6) |
+| 10.5 Контейнерне поле зі значенням не того типу (2026-10-18) | `auto-test` | unit | `list[int] <- 5`, `list[int] <- "abc"`, `tuple[int, int] <- 5`, `dict[str, int] <- 5`, `set[int] <- 5`: `elastic_create` відмовляє `ValidationError` з тими самими типами помилок, що `model_validate` того самого класу на `BaseModel`. На 2026-10-18 — `TypeError`/`AttributeError`, а для рядка — `int_parsing` замість `list_type` |
+| 10.6 `strict_validate` у вкладеному `BaseModel` при `validate=False` (2026-10-18) | `auto-test` | unit | `elastic_create(..., validate=False, strict_validate=True)` з невалідним значенням у вкладеному `BaseModel` відмовляє з тим самим типом помилки, що `model_validate(..., strict=True)` того самого класу на `BaseModel`. На 2026-10-18 вкладена модель будується без перевірки |
 
 ### README і фінальна перевірка (2026-10-15)
 

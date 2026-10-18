@@ -323,7 +323,7 @@ PRD FR-14.
 PRD FR-7, місця 13–20. Текст пишеться після коду, як і решта FR-7.
 
 - Розширення: `extra='forbid'` → `elastic_extra`; `==` враховує `elastic_extra`; копія з `elastic_get_validated_model` переносить `elastic_extra`; при `extra='allow'` ключ, що не заповнив поле, потрапляє ще й у `model_extra`.
-- Межі: валідатори класу в `elastic_create` не запускаються; часткові дані в полях `Optional`/`Union` не підтримуються; помилка `elastic_create` повідомляє лише перше невалідне значення і без шляху поля; `defaults` і `strict_validate` діють на вкладені `ElasticModel` у прямих полях і контейнерах, але не на `Optional`/`Union` і не всередині вкладеного `BaseModel` при `validate=False`. Уточнення 2026-10-18 (компонент 20): валідатори `wrap`/`after` вкладеної моделі pydantic запускає на готовому частковому екземплярі.
+- Межі: валідатори класу в `elastic_create` не запускаються; часткові дані в полях `Optional`/`Union` не підтримуються; помилка `elastic_create` повідомляє лише перше невалідне значення і без шляху поля; `defaults` і `strict_validate` діють на вкладені `ElasticModel` у прямих полях і контейнерах, але не на `Optional`/`Union`. Межу «`strict_validate` не діє всередині вкладеного `BaseModel` при `validate=False`» знято 2026-10-18 (компонент 21). Уточнення 2026-10-18 (компонент 20): валідатори `wrap`/`after` вкладеної моделі pydantic запускає на готовому частковому екземплярі.
 - Межа обліку (2026-10-16, Out of Scope PRD): у моделі з валідації pydantic при `extra='allow'` заборонений ключ з іменем аліасованого поля pydantic кладе і в `model_extra`, і в `model_fields_set`, тож `elastic_is_loaded` для поля з дефолтом повертає `True`.
 - **Обчислювані поля**: після компонента 14 `elastic_create` більше не серіалізує модель. Проба 2026-10-17 показала, що `@computed_field` працює, тому виняток прибрано з README і з Out of Scope PRD. README називає межу: обчислюване поле, що читає незавантажене поле, і `model_dump()`, який його серіалізує, дають `NotLoadedFieldError`.
 
@@ -334,6 +334,16 @@ PRD FR-15.
 - **Власні механізми лишаються**: таблиця ключів, адаптер поля, обхід вкладених моделей (`_elastic_prepare_value`) і обхід стану для перевірки. Публічної заміни, яка не змінює звичайного шляху pydantic, немає (Trade-offs, «Побудова вкладених часткових моделей»).
 - **Мертвий код**: `_SYSTEM_ATTRS` видалено.
 - **Валідатори вкладених моделей**: `elastic_create` будує вкладену модель сам і передає готовий частковий екземпляр у поле, а pydantic на будь-якому екземплярі в полі запускає `@model_validator(mode='wrap')` і `mode='after'`. `field`- і `before`-валідатори не спрацьовують. README (FR-7, місце 16) описує це як виняток від pydantic; тест порівнює з `model_validate` з екземпляром з `model_construct` у полі.
+
+#### 21. Спрощення після рев'ю (2026-10-18)
+
+Рев'ю спрощень `elastic_model.py`; обсяг обрав автор. Поведінка звичайного шляху pydantic не змінюється.
+
+- **Спільне збирання**: `_construct_from_input(model_cls, data, convert)` розкладає вхідні ключі за таблицею (компонент 4), викликає `model_construct` і заповнює `model_extra` (компонент 18). Ним користуються `elastic_create` і вкладений `BaseModel` при збиранні без валідації, тож обидва місця не можуть розійтися. `_put_unfilled_keys_into_model_extra` і прапорець `unknown_fields_to_elastic_extra` прибрано.
+- **Параметри одним об'єктом**: `_CreateOptions(validate, strict_validate, defaults)` з властивостями `validates` (`validate or strict_validate`) і `strict` (`True` або `None`, компонент 16). `_elastic_prepare_value` і `_elastic_coerce_value` стали функціями модуля з тими самими іменами: клас їм був потрібен лише для рекурсії.
+- **Обхід контейнерів**: елементи обходяться, лише коли значення — вхід, який pydantic приймає для контейнера: для `list`/`tuple`/`set` — ітерабельний об'єкт, крім рядка, байтів і словника (`_is_collection_input`); для `dict` — `Mapping`. Інше значення йде в pydantic як є і дає його помилку. Раніше `elastic_create({"x": 5})` для `x: list[int]` падав `TypeError`, а рядок для `list[int]` давав `int_parsing` замість `list_type`. Перелік прийнятних входів перевірено пробою на pydantic 2.11.7: генератор, `deque`, `dict_keys` приймаються, рядок і словник — ні.
+- **`strict_validate` у вкладеному `BaseModel`**: гілка вкладеного `BaseModel` перевіряє `options.validates` замість `validate`, тож `strict_validate=True` при `validate=False` валідує вкладену модель, як і пряме поле.
+- **Чистка**: прибрано `logger`, гілку `if base in (int, str): pass`, закоментований `model_config`, `_elastic_get_model_fields`, гілку `Union` (вона повертала значення як є, так само як кінець функції); форматування шляху помилки винесено в `_format_error_loc`.
 
 ### Data Models
 

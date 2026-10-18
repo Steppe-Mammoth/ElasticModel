@@ -16,7 +16,9 @@
   параметри у вкладених моделях, рантайм-імпорт `Self`. З 2026-10-15:
   облік зі стану pydantic замість after-валідатора, payload перевірки з
   поточного стану, адаптер поля з `FieldInfo` і конфігом, правила
-  `validation_alias`, паритет `model_extra`
+  `validation_alias`, паритет `model_extra`. З 2026-10-18: спільне збирання
+  `_construct_from_input`, параметри `_CreateOptions`, обхід лише
+  контейнерних входів
 - [gostmodels/__init__.py](../../gostmodels/__init__.py)
   :: Публічний експорт пакета. Додається реекспорт класу помилки
 - [README.md](../../README.md)
@@ -785,3 +787,47 @@
   - [X] 20.4 Пройти чекліст місць 13-20 FR-7 PRD [verify: code-only]
       → 8 з 8 у README (рядки в 19.2); додатково — межа обліку, обчислювані
         поля й рівень підтримки Python
+
+- [X] 22.0 **User Story:** Як розробник, що будує модель через
+  `elastic_create`, я хочу отримувати від невалідних значень ту саму
+  `ValidationError`, що й від pydantic, а код бібліотеки — без повторів і
+  мертвого коду, щоб його було легко читати й підтримувати [7/7].
+  Знахідки рев'ю спрощень 2026-10-18; обсяг обрав автор.
+  - [X] 22.1 Написати тест (10.5): контейнерне поле зі значенням не того
+    типу відмовляє, як pydantic [verify: auto-test]
+      → `test_container_field_with_value_of_other_type_matches_pydantic`,
+        6 випадків; до 22.5 усі червоні [live] (2026-10-18)
+  - [X] 22.2 Написати тест (10.6): `strict_validate` діє у вкладеному
+    `BaseModel` при `validate=False` [verify: auto-test]
+      → `test_strict_validate_without_validate_reaches_nested_basemodel`; до
+        22.5 червоний випадок `coercible` [live] (2026-10-18)
+  - [X] 22.3 Чистка: прибрати `logger`, гілку `if base in (int, str)`,
+    закоментований `model_config`, прапорець
+    `unknown_fields_to_elastic_extra`, `_elastic_get_model_fields`;
+    виправити застарілі імена в докстрінгах і нотатках модуля
+    [verify: code-only]
+      → додатково прибрано гілку `Union`, що повертала значення як є, як і
+        кінець функції
+  - [X] 22.4 Спільне збирання через `model_construct` (`_construct_from_input`)
+    для `elastic_create` і вкладеного `BaseModel` замість двох циклів і
+    `_put_unfilled_keys_into_model_extra`; параметри конструктора одним
+    датакласом `_CreateOptions`; `_elastic_prepare_value` і
+    `_elastic_coerce_value` — функції модуля; форматування шляху помилки
+    — `_format_error_loc` [verify: auto-test]
+      → наявні 150 тестів зелені без змін, крім заміни
+        `_elastic_get_model_fields` на `User.model_fields`; проба:
+        `_format_error_loc` дає ті самі шляхи [live] (2026-10-18)
+  - [X] 22.5 Виправити обхід контейнерів (обходити лише значення-контейнер)
+    і валідацію вкладеного `BaseModel` за `validate or strict_validate`;
+    прибрати обмеження з README [verify: auto-test]
+      → умова обходу — вхід, який pydantic приймає для контейнера
+        (`_is_collection_input`, `Mapping`); проба: генератор часткових
+        документів і далі дає часткові моделі; 158 passed [live] (2026-10-18)
+  - [X] 22.6 CHANGELOG, Out of Scope PRD і технічний дизайн після змін
+    [verify: code-only]
+      → CHANGELOG 22; компонент 21 технічного дизайну; межу `strict_validate`
+        знято в PRD (FR-7, межі), дизайні (компонент 19) і test-plan (7.3)
+  - [X] 22.7 Прогнати набір на Python 3.13 (pydantic 2.11.7 і 2.14.1) і на
+    3.10: 0 failed [verify: auto-test]
+      → 3.13 + 2.11.7 і 3.13 + 2.14.1: 158 passed; 3.10 + 2.11.7 і 3.10 +
+        2.14.1: 156 passed, 2 skipped [live] (2026-10-18)
