@@ -205,8 +205,8 @@ Summary:
   - Unknown keys are captured in `model.elastic_extra`
   - Tracks actually loaded fields in `model.elastic_loaded_fields`
   - `defaults=True` applies `default`/`default_factory` to missing fields; those fields are **not** counted as loaded, so `elastic_is_loaded` still reports `False` for them. A default of a field with `validate_default` is validated, as in pydantic
-  - `strict_validate=True` validates in pydantic strict mode, without coercion: `"5"` is not turned into `5`
-  - `defaults` and `strict_validate` reach nested `ElasticModel` in direct fields and inside containers. They do not reach `Optional`/`Union` fields, and `strict_validate` does not apply inside a nested `BaseModel` built with `validate=False`
+  - `strict_validate=True` validates in pydantic strict mode, without coercion: `"5"` is not turned into `5`. It turns validation on even with `validate=False`, nested `BaseModel` included
+  - `defaults` and `strict_validate` reach nested `ElasticModel` in direct fields and inside containers. They do not reach `Optional`/`Union` fields
 
 - Strict read access
   - Accessing an unloaded declared field raises `NotLoadedFieldError`

@@ -93,3 +93,8 @@ A later story sometimes revises an earlier one; such entries say so, and the fin
 ### 21. Review of pydantic mechanisms
 - The code was reviewed for parts that pydantic could do itself. No public pydantic mechanism builds partial models without changing the usual `BaseModel` path, so the library keeps its own construction code. Dead code was removed.
 - README now states that pydantic runs `@model_validator(mode='wrap')` and `mode='after'` of a nested model on the partial instance, as it does for any instance passed into a field.
+
+### 22. Invalid container values and code simplification
+- A container field with a value of another type fails as in pydantic. Before, `elastic_create({"x": 5})` for `x: list[int]` raised `TypeError`, and a string for `list[int]` was split into characters, so the error was `int_parsing` instead of `list_type`. The same applied to `tuple`, `set` and `dict` fields.
+- `strict_validate=True` with `validate=False` now validates a nested `BaseModel` too, as it does for a direct field. The limit is removed from README.
+- Internal: one construction path for `elastic_create` and for a nested `BaseModel` built without validation, the constructor parameters in one object, unused code removed.

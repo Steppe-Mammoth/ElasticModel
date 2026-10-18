@@ -17,7 +17,7 @@ import sys
 from enum import Enum
 from typing import Annotated, Any, Dict, Generic, List, Literal, Tuple, TypeVar, Union
 
-from pydantic import AliasChoices, AliasPath, EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import AliasChoices, AliasPath, EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict, create_model, field_validator, model_validator
 
 from gostmodels import ElasticModel
 
@@ -145,8 +145,7 @@ def test_extra_fields_collected_in_elastic_extra():
     u = User.elastic_create(doc, validate=False)
     assert u.elastic_extra["debug_flag"] == 1
     # .elastic_extra не впливає на схему
-    model_fields = u._elastic_get_model_fields()
-    assert "debug_flag" not in model_fields
+    assert "debug_flag" not in User.model_fields
 
 
 def test_alias_support_for_id():
@@ -1610,6 +1609,53 @@ def test_recursive_model_builds_partial_children():
 
     assert m.children[0].elastic_loaded_fields == {"name", "children"}
     assert m.children[0].children[0].elastic_loaded_fields == {"tag"}
+
+
+# --------------------------
+# Невалідні значення: відмова як у pydantic
+# --------------------------
+
+CONTAINER_MISMATCH_CASES = [
+    pytest.param(list[int], 5, id="list<-int"),
+    pytest.param(list[int], "abc", id="list<-str"),
+    pytest.param(tuple[int, int], 5, id="tuple<-int"),
+    pytest.param(tuple[int, int], {1, 2}, id="tuple<-set"),
+    pytest.param(dict[str, int], 5, id="dict<-int"),
+    pytest.param(set[int], 5, id="set<-int"),
+]
+
+
+@pytest.mark.parametrize("annotation, value", CONTAINER_MISMATCH_CASES)
+def test_container_field_with_value_of_other_type_matches_pydantic(annotation, value):
+    """
+    Значення не того типу в контейнерному полі `elastic_create` не обходить як контейнер, а віддає pydantic як є.
+    Тому результат той самий, що в `model_validate`: `ValidationError` з тими самими типами помилок або та сама модель, якщо pydantic таке значення приймає.
+    """
+    reference_cls = create_model("Holder", __base__=BaseModel, x=(annotation, ...))
+    elastic_cls = create_model("Holder", __base__=ElasticModel, x=(annotation, ...))
+    data = {"x": value}
+
+    expected = _validation_outcome(lambda: reference_cls.model_validate(data))
+
+    assert _validation_outcome(lambda: elastic_cls.elastic_create(data)) == expected
+
+
+@pytest.mark.parametrize("inner_data", [{"a": 1}, {"a": "1"}], ids=["valid", "coercible"])
+def test_strict_validate_without_validate_reaches_nested_basemodel(inner_data):
+    """
+    `strict_validate=True` вмикає валідацію і при `validate=False`, зокрема у вкладеному `BaseModel`.
+    Результат той самий, що в `model_validate(..., strict=True)` того самого класу на `BaseModel`.
+    """
+    class Inner(BaseModel):
+        a: int
+
+    reference_cls = create_model("Holder", __base__=BaseModel, inner=(Inner, ...))
+    elastic_cls = create_model("Holder", __base__=ElasticModel, inner=(Inner, ...))
+    data = {"inner": inner_data}
+
+    expected = _validation_outcome(lambda: reference_cls.model_validate(data, strict=True))
+
+    assert _validation_outcome(lambda: elastic_cls.elastic_create(data, validate=False, strict_validate=True)) == expected
 
 
 # --------------------------
