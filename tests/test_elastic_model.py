@@ -8,14 +8,16 @@
 # - shallow vs deep validation (is_valid / get_validated_model) / shallow vs deep валідацію (is_valid / get_validated_model)
 # - collections (list/set/tuple), dict-keys, Union (discriminated) / колекції (list/set/tuple), dict-ключі, Union (дискримінований)
 # - Annotated-constraints
-# - updating _elastic_loaded_fields on assignment & deletion / оновлення _elastic_loaded_fields при присвоєнні та видаленні
+# - updating elastic_loaded_fields on assignment & deletion / оновлення elastic_loaded_fields при присвоєнні та видаленні
 
 import pytest
 #pytestmark = pytest.mark.filterwarnings("ignore:PydanticSerializationUnexpectedValue")
 
-from typing import Annotated, Any, Dict, List, Literal, Tuple, Union
+import sys
+from enum import Enum
+from typing import Annotated, Any, Dict, Generic, List, Literal, Tuple, TypeVar, Union
 
-from pydantic import EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict
+from pydantic import AliasChoices, AliasPath, EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict, field_validator, model_validator
 
 from gostmodels import ElasticModel
 
@@ -348,7 +350,7 @@ def test_annotated_constraints_preserved():
 
 def test_manual_assignment_updates_loaded_and_deletion_removes_from_loaded():
     """
-    __setattr__ має позначати поле як «завантажене», а delattr — прибирати з loaded.
+    Присвоєння має позначати поле як «завантажене», а `del` — прибирати з loaded.
     """
     u = UserSlim.elastic_create({
         "created": {"at": "t", "by": "sys"}
@@ -490,23 +492,20 @@ def test_elastic_loaded_fields_with_extra_allow_and_deletion():
     assert "debug" not in u.elastic_loaded_fields
 
 
-def test_elastic_extra_always_captures_unknowns_even_with_extra_ignore_and_allow():
+@pytest.mark.parametrize("extra", ["ignore", "allow", "forbid"])
+def test_elastic_extra_always_captures_unknowns(extra):
     """
-    .elastic_extra зберігає unknowns незалежно від налаштування extra.
+    .elastic_extra зберігає невідомі ключі незалежно від налаштування extra.
+    При `extra='forbid'` це розширення: pydantic відхилив би такі дані, а `elastic_create` кладе ключ в `elastic_extra` без помилки.
     """
-    class UIgnore(ElasticModel):
-        model_config = ConfigDict(extra='ignore')
+    class Unknowns(ElasticModel):
+        model_config = ConfigDict(extra=extra)
         a: int
 
-    class UAllow(ElasticModel):
-        model_config = ConfigDict(extra='allow')
-        a: int
+    m = Unknowns.elastic_create({"a": 1, "u": 2}, validate=False)
 
-    ui = UIgnore.elastic_create({"a": 1, "u": 2}, validate=False)
-    ua = UAllow.elastic_create({"a": 1, "u": 2}, validate=False)
-
-    assert ui.elastic_extra["u"] == 2
-    assert ua.elastic_extra["u"] == 2
+    assert m.a == 1
+    assert m.elastic_extra == {"u": 2}
 
 
 def test_strict_validate_blocks_coercion():
@@ -674,8 +673,8 @@ def test_guarantee_boundary_field_shadowing_parent_attribute():
 
 def test_loaded_fields_exclude_library_service_names():
     """
-    Перелік має містити лише завантажені дані. Службовий прапорець завершення протікав туди,
-    бо `__setattr__` перевіряє його вже після виклику `super()`.
+    Перелік має містити лише завантажені дані, без службових імен бібліотеки.
+    Колись туди протікав службовий прапорець завершення; тест охороняє від повернення цього дефекту.
     """
     u = UserSlim.elastic_create({"email": "a@b.com", "created": {"at": "t", "by": "s"}}, validate=False)
 
@@ -684,7 +683,7 @@ def test_loaded_fields_exclude_library_service_names():
 
 def test_loaded_fields_mutation_does_not_change_state():
     """
-    Властивість віддає копію, тому зміна отриманого набору не може зробити так, щоб `elastic_is_loaded` брехав.
+    Зміна отриманого набору не може зробити так, щоб `elastic_is_loaded` брехав.
     """
     u = UserSlim.elastic_create({"email": "a@b.com", "created": {"at": "t", "by": "s"}}, validate=False)
     assert u.elastic_is_loaded("email") is True
@@ -696,9 +695,8 @@ def test_loaded_fields_mutation_does_not_change_state():
 
 def test_loaded_fields_keep_data_keys_including_underscore_with_extra_allow():
     """
-    Фільтр службових імен не зачіпає ключів, що прийшли в даних: усередині конструктора набір наповнює
-    цикл по `model_dump()`, а не `__setattr__`. Ключ із підкресленням у даних є завантаженими даними,
-    а не приватним атрибутом, тому лишається в переліку.
+    Ключ із підкресленням, що прийшов у даних при `extra='allow'`, лежить у `model_extra`.
+    Це завантажені дані, а не приватний атрибут, тому ключ лишається в переліку.
     """
     class UAllow(ElasticModel):
         model_config = ConfigDict(extra='allow')
@@ -712,43 +710,932 @@ def test_loaded_fields_keep_data_keys_including_underscore_with_extra_allow():
 
 
 # --------------------------
-# Публічний контракт: ключі конфігу для мапінгу аліасів
+# Публічний контракт: правила аліасів як у pydantic
 # --------------------------
 
-@pytest.mark.parametrize(
-    "config, alias_is_mapped",
-    [
-        (ConfigDict(populate_by_name=True), True),
-        (ConfigDict(validate_by_name=True), True),
-        (ConfigDict(), False),
-    ],
-    ids=["old-key", "current-key", "no-key"],
-)
-def test_alias_mapping_reads_both_config_keys(config, alias_is_mapped):
-    """
-    Мапінг аліасів має працювати і зі старим ключем конфігу, і з актуальним `validate_by_name`.
-    Без жодного ключа поведінка лишається колишньою: значення за аліасом не мапиться на поле,
-    а потрапляє у сховище невідомих полів, тому доступ за іменем поля падає.
-    """
-    from gostmodels import NotLoadedFieldError
+ALIAS_CONFIGS = [
+    pytest.param(ConfigDict(), id="no-keys"),
+    pytest.param(ConfigDict(validate_by_name=True), id="validate_by_name"),
+    pytest.param(ConfigDict(populate_by_name=True), id="populate_by_name"),
+    pytest.param(ConfigDict(validate_by_name=True, validate_by_alias=False), id="name-only"),
+]
 
+
+def _pydantic_accepts_key(config: ConfigDict, key: str) -> bool:
+    """
+    Еталон для тестів аліасів: чи заповнює pydantic поле `id` (аліас `_id`) з ключа `key` при цьому конфігу.
+    """
+    class Reference(BaseModel):
+        model_config = config
+        id: str = Field(alias="_id")
+
+    try:
+        Reference.model_validate({key: "x-1"})
+        return True
+    except ValidationError:
+        return False
+
+
+@pytest.mark.parametrize("key", ["_id", "id"])
+@pytest.mark.parametrize("config", ALIAS_CONFIGS)
+def test_alias_rules_match_pydantic(config, key):
+    """
+    Вхідний ключ заповнює поле тоді й лише тоді, коли його приймає pydantic з тим самим конфігом.
+    Ключ, який pydantic відкидає, потрапляє у сховище невідомих полів, а поле лишається незавантаженим.
+    """
     class AliasModel(ElasticModel):
         model_config = config
         id: str = Field(alias="_id")
 
-    m = AliasModel.elastic_create({"_id": "x-1"}, validate=False)
+    m = AliasModel.elastic_create({key: "x-1"})
 
-    if alias_is_mapped:
+    if _pydantic_accepts_key(config, key):
         assert m.id == "x-1"
+        assert key not in m.elastic_extra
     else:
-        assert m.elastic_extra["_id"] == "x-1"
+        assert not m.elastic_is_loaded("id")
+        assert m.elastic_extra[key] == "x-1"
+
+
+def test_forbidden_key_does_not_fill_field_with_default():
+    """
+    Ім'я аліасованого поля без ключів конфігу заборонене, тому воно не заповнює поле в обхід конфігу.
+    Межовий випадок — поле з дефолтом: заборонений ключ не має позначити цей дефолт завантаженим.
+    """
+    class WithDefault(ElasticModel):
+        code: str = Field("-", alias="_code")
+
+    m = WithDefault.elastic_create({"code": "c"})
+
+    assert not m.elastic_is_loaded("code")
+    assert m.elastic_extra == {"code": "c"}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"_id": "A", "id": "N"}, {"id": "N", "_id": "A"}],
+    ids=["alias-first", "name-first"],
+)
+def test_alias_wins_over_field_name(data):
+    """
+    Якщо для поля прийшли і аліас, і ім'я, поле отримує значення аліасу незалежно від порядку ключів, як у pydantic.
+    Ключ, що програв, не губиться: він потрапляє у сховище невідомих полів.
+    """
+    class BothKeys(ElasticModel):
+        model_config = ConfigDict(validate_by_name=True)
+        id: str = Field(alias="_id")
+
+    m = BothKeys.elastic_create(data)
+
+    assert m.id == "A"
+    assert m.elastic_extra == {"id": "N"}
+
+
+def test_validation_methods_agree_for_model_built_by_alias():
+    """
+    Модель без ключів конфігу будується за аліасом, а payload валідації складається з імен полів.
+    Обидва методи валідації мають прийняти такий payload, інакше `elastic_is_valid` бреше про відсутнє поле.
+    """
+    class AliasOnly(ElasticModel):
+        id: str = Field(alias="_id")
+        name: str
+
+    m = AliasOnly.elastic_create({"_id": "u1", "name": "Ann"})
+
+    assert m.elastic_is_valid(recursive=True) == (True, [])
+    assert m.elastic_is_valid(recursive=False) == (True, [])
+    assert m.elastic_get_validated_model().id == "u1"
+
+
+@pytest.mark.parametrize("key", ["_id", "id"])
+@pytest.mark.parametrize("config", ALIAS_CONFIGS)
+def test_nested_basemodel_alias_rules_match_pydantic(config, key):
+    """
+    При `validate=False` вкладений `BaseModel` будує бібліотека, а не pydantic, тому правила аліасів мають збігатися з pydantic і тут.
+    Інакше той самий вкладений клас приймав би різні ключі залежно від прапорця `validate`.
+    """
+    class Inner(BaseModel):
+        model_config = config
+        id: str = Field(alias="_id")
+
+    class Outer(ElasticModel):
+        inner: Inner
+
+    m = Outer.elastic_create({"inner": {key: "x-1"}}, validate=False)
+
+    if _pydantic_accepts_key(config, key):
+        assert m.inner.id == "x-1"
+    else:
+        assert "id" not in m.inner.model_fields_set
+
+
+VALIDATION_ALIAS_FIELDS = {
+    "string": lambda: Field(0, alias="_a", validation_alias="_v"),
+    "choices": lambda: Field(0, alias="_a", validation_alias=AliasChoices("_v", AliasPath("meta", 0))),
+    "path": lambda: Field(0, alias="_a", validation_alias=AliasPath("meta", 0)),
+    "no-alias": lambda: Field(0, validation_alias="_v"),
+}
+
+
+def _validation_alias_class(base: type[BaseModel], field_kind: str, config: ConfigDict = ConfigDict()) -> type[BaseModel]:
+    """
+    Клас з полем `x`, що має власний `validation_alias`, оголошений на `base`.
+    Дефолт поля потрібен, щоб pydantic прийняв дані, в яких поле не заповнене.
+    """
+    class ValidationAliasModel(base):
+        model_config = config
+        x: int = VALIDATION_ALIAS_FIELDS[field_kind]()
+
+    return ValidationAliasModel
+
+
+@pytest.mark.parametrize("key", ["x", "_a"])
+@pytest.mark.parametrize("config", ALIAS_CONFIGS)
+@pytest.mark.parametrize("field_kind", VALIDATION_ALIAS_FIELDS)
+def test_validation_alias_field_key_rules_match_pydantic(field_kind, config, key):
+    """
+    Для поля з власним `validation_alias` ім'я й `alias` заповнюють поле тоді й лише тоді, коли їх приймає pydantic з тим самим конфігом.
+    pydantic валідує таке поле лише за `validation_alias` і, з `validate_by_name`, за іменем, тож `alias` не приймається за жодного конфігу.
+    """
+    accepted = _validation_alias_class(BaseModel, field_kind, config).model_validate({key: 7}).x == 7
+
+    m = _validation_alias_class(ElasticModel, field_kind, config).elastic_create({key: 7})
+
+    assert m.elastic_is_loaded("x") == accepted
+    if not accepted:
+        assert m.elastic_extra == {key: 7}
+
+
+@pytest.mark.parametrize("defaults", [False, True])
+@pytest.mark.parametrize(
+    "field_kind, data",
+    [
+        ("string", {"_v": "bad"}),
+        ("choices", {"_v": "bad"}),
+        ("choices", {"meta": ["bad"]}),
+        ("path", {"meta": ["bad"]}),
+        ("no-alias", {"_v": "bad"}),
+    ],
+)
+def test_validation_alias_key_does_not_fill_field(field_kind, data, defaults):
+    """
+    Ключ `validation_alias` поле не заповнює: читання таких ключів поза scope, а `model_construct` заповнив би ним поле без валідації.
+    Значення лежить в `elastic_extra`, поле не завантажене, а з `defaults=True` у полі дефолт, а не невалідне значення.
+    """
+    m = _validation_alias_class(ElasticModel, field_kind).elastic_create(data, defaults=defaults)
+
+    assert not m.elastic_is_loaded("x")
+    assert m.elastic_extra == data
+    if defaults:
+        assert m.x == 0
+
+
+# --------------------------
+# Публічний контракт: сховище невідомих полів і облік завантажених полів
+# --------------------------
+
+def test_elastic_extra_mutation_does_not_change_model():
+    """
+    Властивість віддає копію, тому зміна отриманого словника не змінює модель.
+    """
+    m = Created.elastic_create({"at": "t", "unknown": 1})
+
+    extra = m.elastic_extra
+    extra.clear()
+    extra["injected"] = 2
+
+    assert m.elastic_extra == {"unknown": 1}
+
+
+def test_models_created_by_validation_know_loaded_fields():
+    """
+    Модель, яку створила валідація pydantic, вважає завантаженими поля з вхідних даних — на кожному рівні вкладеності.
+    Поле, заповнене дефолтом під час валідації, завантаженим не вважається: та сама семантика, що в `elastic_create`.
+    Після створення облік триває: присвоєння додає поле до переліку.
+    """
+    class Stamp(ElasticModel):
+        at: str
+        by: str = "system"
+
+    class Owner(ElasticModel):
+        id: str
+        name: str
+        created: Stamp
+
+    src = Owner.elastic_create({"id": "1", "name": "Ann", "created": {"at": "2025"}})
+    validated = src.elastic_get_validated_model(recursive=True)
+    constructed = Owner(id="1", name="Ann", created=Stamp(at="2025"))
+
+    for m in (validated, constructed):
+        assert m.elastic_loaded_fields == {"id", "name", "created"}
+        assert m.created.elastic_loaded_fields == {"at"}
+
+    validated.created.by = "me"
+    assert validated.created.elastic_is_loaded("by")
+
+
+def test_shallow_validation_does_not_change_source_loaded_fields():
+    """
+    Shallow-перевірка передає вкладену модель у pydantic як є, і pydantic знову запускає на ній валідатори моделі.
+    Облік завантажених полів вихідної моделі від цього змінюватися не повинен, зокрема не повинно повернутися видалене поле.
+    """
+    class Stamp(ElasticModel):
+        at: str
+        by: str = "system"
+
+    class Owner(ElasticModel):
+        created: Stamp
+
+    src = Owner.elastic_create({"created": {"at": "2025", "by": "me"}})
+    del src.created.by
+
+    src.elastic_is_valid(recursive=False)
+
+    assert src.created.elastic_loaded_fields == {"at"}
+
+
+# --------------------------
+# Публічний контракт: параметри конструктора у вкладених моделях
+# --------------------------
+
+def test_defaults_reach_nested_models():
+    """
+    `defaults=True` діє на кожному рівні вкладеності, зокрема в елементах списку.
+    Дефолт вкладеної моделі читається, але не вважається завантаженим — та сама семантика, що на верхньому рівні.
+    """
+    class Stamp(ElasticModel):
+        at: str
+        by: str = "system"
+
+    class Owner(ElasticModel):
+        created: Stamp
+        history: list[Stamp]
+
+    m = Owner.elastic_create({"created": {"at": "1"}, "history": [{"at": "2"}]}, defaults=True)
+
+    assert m.created.by == "system"
+    assert not m.created.elastic_is_loaded("by")
+    assert m.history[0].by == "system"
+    assert not m.history[0].elastic_is_loaded("by")
+
+
+def test_strict_validate_reaches_nested_models():
+    """
+    `strict_validate=True` вимикає коерсинг і у вкладеній моделі: рядок не стає числом.
+    Без прапорця той самий рядок коерситься.
+    """
+    class Counter(ElasticModel):
+        n: int
+
+    class Holder(ElasticModel):
+        counter: Counter
+
+    assert Holder.elastic_create({"counter": {"n": "5"}}).counter.n == 5
+
+    with pytest.raises(ValidationError):
+        Holder.elastic_create({"counter": {"n": "5"}}, strict_validate=True)
+
+
+# --------------------------
+# Публічний контракт: анотації публічних методів у рантаймі
+# --------------------------
+
+def test_public_method_annotations_resolve_at_runtime():
+    """
+    Інструменти, що читають анотації в рантаймі (`validate_call`, генератори документації), мають розв'язувати повернення публічних методів.
+    Тест іде і в прогін на Python 3.10, де `Self` у `typing` ще немає.
+    """
+    import typing
+
+    from typing_extensions import Self
+
+    for method in (ElasticModel.elastic_create, ElasticModel.elastic_get_validated_model):
+        assert typing.get_type_hints(method)["return"] is Self
+
+
+# --------------------------
+# Відповідність BaseModel: модель зі звичайного шляху pydantic
+# --------------------------
+
+def _pair_class(base: type[BaseModel], **config) -> type[BaseModel]:
+    """
+    Той самий клас, оголошений на `base`: еталон — `BaseModel`, перевірюваний — `ElasticModel`.
+    """
+    class Pair(base):
+        model_config = ConfigDict(**config)
+        a: int
+        b: int = 2
+
+    return Pair
+
+
+def _assigned_default_value(cls):
+    m = cls(a=1)
+    m.b = 2
+    return m, cls(a=1)
+
+
+EQUALITY_PAIRS = [
+    pytest.param(lambda cls: (cls(a=1), cls(a=1, b=2)), {}, id="default-vs-explicit"),
+    pytest.param(lambda cls: (cls(a=1), cls(a=1, b=3)), {}, id="different-data"),
+    pytest.param(lambda cls: (cls.model_construct(a=1), cls(a=1)), {}, id="construct-vs-init"),
+    pytest.param(lambda cls: (cls(a=1).model_copy(), cls(a=1, b=2)), {}, id="copy-vs-init"),
+    pytest.param(_assigned_default_value, {}, id="assigned-default-value"),
+    pytest.param(lambda cls: (cls(a=1), cls(a=1, b=2)), {"frozen": True}, id="frozen"),
+]
+
+
+@pytest.mark.parametrize("make_pair, config", EQUALITY_PAIRS)
+def test_equality_matches_pydantic(make_pair, config):
+    """
+    `==` для моделей зі звичайного шляху pydantic дає той самий результат, що й для того самого класу на `BaseModel`.
+    pydantic порівнює і приватні атрибути, тому стан бібліотеки, що різниться для однакових даних, ламав би цю рівність.
+    """
+    left, right = make_pair(_pair_class(BaseModel, **config))
+    elastic_left, elastic_right = make_pair(_pair_class(ElasticModel, **config))
+
+    assert (elastic_left == elastic_right) == (left == right)
+
+
+def test_loaded_fields_follow_model_state_after_copies_and_special_paths():
+    """
+    Облік завантажених полів відповідає стану моделі на шляхах, що змінюють модель в обхід її перехоплювачів.
+    - поверхнева копія не ділить облік з оригіналом;
+    - `model_copy(update=...)` і `model_construct` позначають передані поля завантаженими;
+    - присвоєння через сетер `@property` не додає в облік ім'я властивості.
+    """
+    class Doc(ElasticModel):
+        x: int
+        y: int = 0
+
+        @property
+        def double_x(self) -> int:
+            return self.x * 2
+
+        @double_x.setter
+        def double_x(self, value: int) -> None:
+            self.x = value // 2
+
+    original = Doc.elastic_create({"x": 1})
+    copied = original.model_copy()
+    copied.y = 5
+    assert copied.elastic_is_loaded("y")
+    assert not original.elastic_is_loaded("y")
+
+    updated = Doc.elastic_create({"x": 1}).model_copy(update={"y": 5})
+    assert updated.y == 5
+    assert updated.elastic_is_loaded("y")
+
+    assert Doc.model_construct(x=1).elastic_is_loaded("x")
+
+    m = Doc(x=1)
+    m.double_x = 10
+    assert m.x == 5
+    assert m.elastic_loaded_fields == {"x"}
+
+
+def test_nested_model_validation_errors_match_pydantic():
+    """
+    Помилки валідації вкладеної моделі мають той самий заголовок, тип і шлях, що й для того самого класу на `BaseModel`.
+    Механізм бібліотеки не повинен з'являтися в тексті помилок, які бачить користувач.
+    """
+    from pydantic import TypeAdapter
+
+    def errors_for(base: type[BaseModel]):
+        class Leaf(base):
+            n: int
+
+        with pytest.raises(ValidationError) as caught:
+            TypeAdapter(Union[Leaf, int]).validate_python({"n": "x"})
+        return caught.value.title, [(e["type"], e["loc"]) for e in caught.value.errors()]
+
+    assert errors_for(ElasticModel) == errors_for(BaseModel)
+
+
+def test_elastic_create_with_serialize_by_alias_matches_pydantic():
+    """
+    Налаштування серіалізації не впливають на побудову моделі: повні дані дають те саме, що `model_validate`,
+    а аліасоване поле вважається завантаженим під своїм іменем.
+    """
+    def build(base: type[BaseModel]):
+        class Account(base):
+            model_config = ConfigDict(serialize_by_alias=True)
+            id: str = Field(alias="_id")
+            name: str = "-"
+
+        return Account
+
+    data = {"_id": "1", "name": "Ann"}
+
+    reference = build(BaseModel).model_validate(data)
+    elastic = build(ElasticModel).elastic_create(data)
+
+    assert elastic.model_dump() == reference.model_dump()
+    assert elastic.elastic_loaded_fields == {"id", "name"}
+
+
+def test_elastic_create_on_frozen_model():
+    """
+    `elastic_create` будує frozen-модель: незавантажений дефолт прибирається без присвоєння, яке frozen-модель забороняє.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    class Frozen(ElasticModel):
+        model_config = ConfigDict(frozen=True)
+        x: int
+        y: int = 0
+
+    m = Frozen.elastic_create({"x": 1})
+
+    assert m.x == 1
+    assert not m.elastic_is_loaded("y")
+    with pytest.raises(NotLoadedFieldError):
+        m.y
+
+
+def test_equality_counts_elastic_extra():
+    """
+    Модель з `elastic_create` — уже не те саме, що `BaseModel`: `==` враховує її `elastic_extra`.
+    Моделі без невідомих ключів це не зачіпає, тому вона дорівнює моделі з конструктора з тими самими даними.
+    """
+    class Item(ElasticModel):
+        a: int
+
+    assert Item.elastic_create({"a": 1, "x": 9}) != Item.elastic_create({"a": 1})
+    assert Item.elastic_create({"a": 1}) == Item(a=1)
+
+
+# --------------------------
+# Відповідність BaseModel: перевірка моделі
+# --------------------------
+
+@pytest.mark.parametrize("recursive", [True, False], ids=["deep", "shallow"])
+def test_validation_does_not_take_field_value_from_model_extra(recursive):
+    """
+    При `extra='allow'` ключ з іменем аліасованого поля, що програв аліасу, pydantic кладе в `model_extra`.
+    Перевірка не повинна брати з нього значення поля: копія має те саме поле й той самий `model_extra`, що й pydantic.
+    Коли саме поле видалене, такий ключ не повинен його підмінити — модель невалідна.
+    """
+    def build(base: type[BaseModel]):
+        class Account(base):
+            model_config = ConfigDict(extra="allow")
+            uid: str = Field(alias="_id")
+
+        return Account
+
+    data = {"_id": "REAL", "uid": "FAKE"}
+    reference = build(BaseModel).model_validate(data)
+    m = build(ElasticModel).model_validate(data)
+
+    validated = m.elastic_get_validated_model(recursive=recursive)
+    assert (validated.uid, validated.model_extra) == (reference.uid, reference.model_extra)
+
+    del m.uid
+    assert m.elastic_is_valid(recursive=recursive) == (False, ["uid"])
+
+
+def _serialized_by_alias(base: type[BaseModel]):
+    class Account(base):
+        model_config = ConfigDict(serialize_by_alias=True)
+        uid: str = Field(alias="_id")
+
+    return Account, {"_id": "1"}
+
+
+def _excluded_from_dump(base: type[BaseModel]):
+    class Account(base):
+        secret: str = Field(exclude=True)
+
+    return Account, {"secret": "s"}
+
+
+def _custom_serializer(base: type[BaseModel]):
+    from pydantic import field_serializer
+
+    class Counter(base):
+        n: int
+
+        @field_serializer("n")
+        def _show_n(self, value: int) -> str:
+            return f"#{value}"
+
+    return Counter, {"n": 1}
+
+
+def _computed_with_forbid(base: type[BaseModel]):
+    from pydantic import computed_field
+
+    class Square(base):
+        model_config = ConfigDict(extra="forbid")
+        side: int
+
+        @computed_field
+        @property
+        def area(self) -> int:
+            return self.side * self.side
+
+    return Square, {"side": 2}
+
+
+@pytest.mark.parametrize(
+    "build",
+    [_serialized_by_alias, _excluded_from_dump, _custom_serializer, _computed_with_forbid],
+    ids=["serialize_by_alias", "exclude", "field_serializer", "computed_field"],
+)
+def test_deep_validation_ignores_serialization_settings(build):
+    """
+    Налаштування виводу моделі не впливають на перевірку: модель, яку pydantic вважає валідною, валідна й для глибокої перевірки.
+    """
+    reference_cls, data = build(BaseModel)
+    reference_cls.model_validate(data)
+
+    elastic_cls, _ = build(ElasticModel)
+    m = elastic_cls.elastic_create(data)
+
+    assert m.elastic_is_valid(recursive=True) == (True, [])
+
+
+def test_elastic_create_supports_computed_field():
+    """
+    `elastic_create` будує модель з `@computed_field`, бо більше не серіалізує модель під час створення.
+    З повними даними `model_dump()` збігається з pydantic.
+    Обчислюване поле, що читає незавантажене поле, дає `NotLoadedFieldError`, як і будь-який інший код, що читає таке поле.
+    """
+    from pydantic import computed_field
+
+    from gostmodels import NotLoadedFieldError
+
+    def build(base: type[BaseModel]) -> type[BaseModel]:
+        class Person(base):
+            first: str
+            last: str
+
+            @computed_field
+            @property
+            def full(self) -> str:
+                return f"{self.first} {self.last}"
+
+        return Person
+
+    data = {"first": "Ann", "last": "Lee"}
+    assert build(ElasticModel).elastic_create(data).model_dump() == build(BaseModel).model_validate(data).model_dump()
+
+    partial = build(ElasticModel).elastic_create({"first": "Ann"})
+
+    assert partial.elastic_loaded_fields == {"first"}
+    with pytest.raises(NotLoadedFieldError):
+        partial.full
+
+
+@pytest.mark.parametrize("recursive", [True, False], ids=["deep", "shallow"])
+def test_validated_copy_keeps_elastic_extra(recursive):
+    """
+    Копія з `elastic_get_validated_model` переносить `elastic_extra` джерела на кожному рівні вкладеності, зокрема в елементах списку.
+    Тому валідна модель дорівнює своїй копії: `==` враховує `elastic_extra`.
+    """
+    class Stamp(ElasticModel):
+        at: str
+
+    class Owner(ElasticModel):
+        name: str
+        created: Stamp
+        history: list[Stamp]
+
+    src = Owner.elastic_create({
+        "name": "Ann",
+        "zz": 1,
+        "created": {"at": "t", "yy": 2},
+        "history": [{"at": "h", "ww": 3}],
+    })
+
+    validated = src.elastic_get_validated_model(recursive=recursive)
+
+    assert validated.elastic_extra == {"zz": 1}
+    assert validated.created.elastic_extra == {"yy": 2}
+    assert validated.history[0].elastic_extra == {"ww": 3}
+    assert validated == src
+
+
+UNFILLED_KEY_CASES = [
+    pytest.param({}, {"id": "N", "x": 1}, id="forbidden-name"),
+    pytest.param({"validate_by_name": True, "validate_by_alias": False}, {"_id": "A", "x": 1}, id="forbidden-alias"),
+    pytest.param({"validate_by_name": True}, {"_id": "A", "id": "N", "x": 1}, id="name-lost-to-alias"),
+]
+
+
+def _unfilled_key_class(base: type[BaseModel], **config) -> type[BaseModel]:
+    """
+    Клас з аліасованим полем при `extra='allow'`, оголошений на `base`.
+    Дефолт поля потрібен, щоб pydantic прийняв дані, в яких поле не заповнене.
+    """
+    class Keys(base):
+        model_config = ConfigDict(extra="allow", **config)
+        id: str = Field("default", alias="_id")
+
+    return Keys
+
+
+@pytest.mark.parametrize("config, data", UNFILLED_KEY_CASES)
+def test_unfilled_key_lands_in_model_extra_as_in_pydantic(config, data):
+    """
+    При `extra='allow'` pydantic кладе в `model_extra` і ключ, що не заповнив поле: заборонений конфігом або той, що програв аліасу.
+    `elastic_create` дає той самий `model_extra`, а поле заповнює лише тоді, коли його заповнює pydantic.
+    """
+    from gostmodels import NotLoadedFieldError
+
+    reference = _unfilled_key_class(BaseModel, **config).model_validate(data)
+    filled = reference.id != "default"
+
+    m = _unfilled_key_class(ElasticModel, **config).elastic_create(data)
+
+    assert m.model_extra == reference.model_extra
+    assert m.elastic_is_loaded("id") == filled
+    if filled:
+        assert m.id == reference.id
+    else:
         with pytest.raises(NotLoadedFieldError):
-            _ = m.id
+            m.id
+
+
+@pytest.mark.parametrize("config, data", UNFILLED_KEY_CASES)
+def test_nested_basemodel_unfilled_key_lands_in_model_extra_as_in_pydantic(config, data):
+    """
+    Те саме правило для вкладеного `BaseModel`, який при `validate=False` будує бібліотека, а не pydantic.
+    """
+    Inner = _unfilled_key_class(BaseModel, **config)
+    reference = Inner.model_validate(data)
+    filled = reference.id != "default"
+
+    class Outer(ElasticModel):
+        inner: Inner
+
+    m = Outer.elastic_create({"inner": data}, validate=False)
+
+    assert m.inner.model_extra == reference.model_extra
+    assert ("id" in m.inner.model_fields_set) == filled
+    if filled:
+        assert m.inner.id == reference.id
+
+
+# --------------------------
+# Відповідність BaseModel: валідація значення за правилами поля
+# --------------------------
+
+T = TypeVar("T")
+
+
+class _Color(Enum):
+    RED = "red"
+
+
+class _Point:
+    """Довільний клас, для якого pydantic не має схеми."""
+
+
+POINT = _Point()
+
+
+def _field_constraint(base: type[BaseModel]):
+    class Rule(base):
+        x: int = Field(gt=0)
+
+    return Rule, {"x": -1}
+
+
+def _strict_config(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(strict=True)
+        x: int
+
+    return Rule, {"x": "5"}
+
+
+def _strip_whitespace(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        x: str
+
+    return Rule, {"x": "  a  "}
+
+
+def _to_lower(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(str_to_lower=True)
+        x: str
+
+    return Rule, {"x": "ABC"}
+
+
+def _numbers_to_str(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(coerce_numbers_to_str=True)
+        x: str
+
+    return Rule, {"x": 5}
+
+
+def _enum_values(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(use_enum_values=True)
+        x: _Color
+
+    return Rule, {"x": "red"}
+
+
+def _arbitrary_type(base: type[BaseModel]):
+    class Rule(base):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        x: _Point
+
+    return Rule, {"x": POINT}
+
+
+def _generic_parameter(base: type[BaseModel]):
+    class Box(base, Generic[T]):
+        x: T
+
+    return Box[int], {"x": "5"}
+
+
+def _validated_default(base: type[BaseModel]):
+    class Rule(base):
+        x: int = Field("5", validate_default=True)
+
+    return Rule, {}
+
+
+FIELD_RULE_CASES = [
+    pytest.param(_field_constraint, id="field-constraint"),
+    pytest.param(_strict_config, id="strict-config"),
+    pytest.param(_strip_whitespace, id="str_strip_whitespace"),
+    pytest.param(_to_lower, id="str_to_lower"),
+    pytest.param(_numbers_to_str, id="coerce_numbers_to_str"),
+    pytest.param(_enum_values, id="use_enum_values"),
+    pytest.param(_arbitrary_type, id="arbitrary_types_allowed"),
+    pytest.param(_generic_parameter, id="generic"),
+    pytest.param(_validated_default, id="validate_default"),
+]
+
+
+def _validation_outcome(create) -> tuple[str, Any]:
+    """
+    Результат побудови моделі в порівнюваному вигляді: `model_dump()` при успіху або типи помилок при `ValidationError`.
+    """
+    try:
+        return "ok", create().model_dump()
+    except ValidationError as exc:
+        return "error", [error["type"] for error in exc.errors()]
+
+
+@pytest.mark.parametrize("build", FIELD_RULE_CASES)
+def test_elastic_create_validates_values_by_field_rules_as_pydantic(build):
+    """
+    `elastic_create(validate=True)` валідує значення за правилами поля pydantic: обмеженнями `Field`, конфігом моделі, параметром generic і `validate_default`.
+    Для того самого класу на `BaseModel` і тих самих даних результат `model_dump()` чи типи помилок збігаються з `model_validate`.
+    `defaults=True`, бо інакше дефолт не потрапляє в модель і `validate_default` нічого перевірити.
+    """
+    reference_cls, data = build(BaseModel)
+    elastic_cls, _ = build(ElasticModel)
+
+    expected = _validation_outcome(lambda: reference_cls.model_validate(data))
+
+    assert _validation_outcome(lambda: elastic_cls.elastic_create(data, defaults=True)) == expected
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="Python 3.10 не розв'язує рядок усередині вбудованого generic (`list['Leaf']`); 3.10 не підтримується офіційно, обмеження описане в README",
+)
+def test_local_classes_with_string_annotation_match_pydantic():
+    """
+    Класи, оголошені всередині функції, де один посилається на другий рядком, `elastic_create` будує так само, як `model_validate`.
+    pydantic розв'язує такий рядок під час оголошення класу, а пізніше локального імені вже ніде не видно.
+    """
+    def build(base: type[BaseModel]) -> type[BaseModel]:
+        class Leaf(base):
+            v: int
+
+        class Root(base):
+            leaf: "Leaf"
+            leaves: list["Leaf"]
+
+        return Root
+
+    data = {"leaf": {"v": "1"}, "leaves": [{"v": "2"}]}
+
+    assert build(ElasticModel).elastic_create(data).model_dump() == build(BaseModel).model_validate(data).model_dump()
+
+
+# --------------------------
+# Валідатори класу і рекурсія у вкладених моделях
+# --------------------------
+
+def _leaf_with_validators(base: type[BaseModel], calls: list[str]) -> type[BaseModel]:
+    """
+    Модель з вкладеною моделлю, що має валідатори класу всіх видів; кожен валідатор записує свій виклик у `calls`.
+    """
+    class Leaf(base):
+        a: int
+        b: int
+
+        @field_validator("a")
+        @classmethod
+        def on_field(cls, value):
+            calls.append("field")
+            return value
+
+        @model_validator(mode="before")
+        @classmethod
+        def on_before(cls, value):
+            calls.append("before")
+            return value
+
+        @model_validator(mode="wrap")
+        @classmethod
+        def on_wrap(cls, value, handler):
+            calls.append("wrap")
+            return handler(value)
+
+        @model_validator(mode="after")
+        def on_after(self):
+            calls.append("after")
+            return self
+
+    class Root(base):
+        leaf: Leaf
+
+    return Root
+
+
+def test_nested_model_validators_in_elastic_create_match_pydantic_for_instances():
+    """
+    `elastic_create` будує вкладену модель сам, тому її `field`- і `before`-валідатори не спрацьовують.
+    Готовий частковий екземпляр далі проходить схему поля, і pydantic запускає на ньому `wrap`- і `after`-валідатори.
+    Те саме pydantic робить з будь-яким готовим екземпляром у полі, тож еталон — `model_validate` з екземпляром з `model_construct`.
+    На звичайному шляху спрацьовують ті самі валідатори, що й у того самого класу на `BaseModel`.
+    """
+    calls: list[str] = []
+    root_cls = _leaf_with_validators(ElasticModel, calls)
+
+    reference_calls: list[str] = []
+    reference_cls = _leaf_with_validators(BaseModel, reference_calls)
+    leaf_cls = reference_cls.model_fields["leaf"].annotation
+
+    root_cls.elastic_create({"leaf": {"a": "1"}})
+    reference_cls.model_validate({"leaf": leaf_cls.model_construct(a=1)})
+    assert calls == reference_calls
+
+    calls.clear()
+    reference_calls.clear()
+    full = {"leaf": {"a": 1, "b": 2}}
+    root_cls.model_validate(full)
+    reference_cls.model_validate(full)
+    assert calls == reference_calls
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="Python 3.10 не розв'язує рядок усередині вбудованого generic (`list['Node']`); 3.10 не підтримується офіційно, обмеження описане в README",
+)
+def test_recursive_model_builds_partial_children():
+    """
+    Рекурсивна модель будує часткових нащадків на кожному рівні.
+    """
+    class Node(ElasticModel):
+        name: str
+        tag: str
+        children: list["Node"] = []
+
+    m = Node.elastic_create({"name": "root", "children": [{"name": "kid", "children": [{"tag": "t"}]}]})
+
+    assert m.children[0].elastic_loaded_fields == {"name", "children"}
+    assert m.children[0].children[0].elastic_loaded_fields == {"tag"}
 
 
 # --------------------------
 # Публічний контракт: README як джерело підпису конструктора
 # --------------------------
+
+def _documented_param_names(params_text: str) -> set[str]:
+    """
+    Імена параметрів із тексту підпису, як його записано в README (вміст дужок).
+
+    Текст підставляється у фіктивне `def` і розбирається через `ast`, тому коми всередині анотацій (`dict[str, Any]`) не ламають розбір.
+    Маркер keyword-only (`*`) теж розбирається коректно й імен не додає.
+    """
+    import ast
+
+    function = ast.parse(f"def _documented({params_text}): pass").body[0]
+    arguments = function.args
+    return {arg.arg for arg in arguments.posonlyargs + arguments.args + arguments.kwonlyargs}
+
+
+def test_documented_param_names_handles_generic_annotations():
+    """
+    Коми всередині узагальнених анотацій не мають ламати розбір підпису: `dict[str, Any]` — один параметр, а не два.
+    """
+    assert _documented_param_names("data: dict[str, Any], validate: bool = True") == {"data", "validate"}
+
 
 def test_readme_documents_actual_constructor_parameters():
     """
@@ -766,9 +1653,7 @@ def test_readme_documents_actual_constructor_parameters():
     signature_match = re.search(r"`ElasticModel\.elastic_create\((.*?)\)\s*->", readme_text)
     assert signature_match, "У README немає рядка з підписом `ElasticModel.elastic_create(...) -> ...`"
 
-    # Відкидаємо маркер keyword-only (`*`) і залишаємо лише імена параметрів.
-    documented_params = {part.split(":")[0].strip().lstrip("*").strip() for part in signature_match.group(1).split(",")}
-    documented_params.discard("")
+    documented_params = _documented_param_names(signature_match.group(1))
 
     actual_params = set(inspect.signature(ElasticModel.elastic_create).parameters)
 
