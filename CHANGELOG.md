@@ -97,4 +97,5 @@ A later story sometimes revises an earlier one; such entries say so, and the fin
 ### 22. Invalid container values and code simplification
 - A container field with a value of another type fails as in pydantic. Before, `elastic_create({"x": 5})` for `x: list[int]` raised `TypeError`, and a string for `list[int]` was split into characters, so the error was `int_parsing` instead of `list_type`. The same applied to `tuple`, `set` and `dict` fields.
 - `strict_validate=True` with `validate=False` now validates a nested `BaseModel` too, as it does for a direct field. The limit is removed from README.
+- Data keys `cls` and `_fields_set` are treated as ordinary unknown keys, as in pydantic. Before, `cls` raised `TypeError`, and `_fields_set` made the fields from the data count as not loaded. A field named `cls` is still not supported, as in pydantic's `model_construct`; README lists the limit.
 - Internal: one construction path for `elastic_create` and for a nested `BaseModel` built without validation, the constructor parameters in one object, unused code removed.

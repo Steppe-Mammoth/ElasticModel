@@ -68,6 +68,12 @@ from typing_extensions import Self
 
 _ModelT = TypeVar('_ModelT', bound=BaseModel)
 
+# Імена параметрів `model_construct(cls, _fields_set=None, **values)`.
+# Ключ даних з таким ім'ям, переданий у `**values`, `model_construct` прийняв би як свій параметр:
+# `cls` дає `TypeError`, а `_fields_set` підміняє перелік заповнених полів, і поля з даних стають незавантаженими.
+# Тому такі ключі `model_construct` не отримує; в `elastic_extra` і `model_extra` вони потрапляють, як будь-який невідомий ключ.
+_MODEL_CONSTRUCT_PARAMS = frozenset({'cls', '_fields_set'})
+
 # =========================
 #   Helper Entities
 # =========================
@@ -222,6 +228,7 @@ def _construct_from_input(model_cls: type[_ModelT], data: Mapping[str, Any], con
 
     - Ключ, що заповнює поле, дає йому значення `convert(ім'я поля, значення)`.
     - Невідомий ключ віддається `model_construct`, і той вирішує його долю за `ConfigDict.extra`.
+      Виняток — ключі з іменами параметрів самого `model_construct` (`_MODEL_CONSTRUCT_PARAMS`).
     - Ключ з ім'ям чи аліасом поля, що поле не заповнив (заборонений конфігом або програв аліасу), `model_construct` не віддається:
       той приймає такі ключі безумовно й заповнив би ним поле в обхід конфігу.
     - При `extra='allow'` `model_extra` отримує кожен ключ, що не заповнив поле, у порядку вхідних даних — так робить pydantic.
@@ -244,7 +251,7 @@ def _construct_from_input(model_cls: type[_ModelT], data: Mapping[str, Any], con
             continue
 
         unfilled[key] = value
-        if key not in key_map.field_keys:
+        if key not in key_map.field_keys and key not in _MODEL_CONSTRUCT_PARAMS:
             construct_data[key] = value
 
     instance = model_cls.model_construct(**construct_data)

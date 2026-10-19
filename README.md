@@ -270,6 +270,7 @@ Limits of `elastic_create`:
 - Partial data is not supported inside `Optional`/`Union` fields: with `validate=True` pydantic validates the value in full, so a partial dict raises `ValidationError`; with `validate=False` the dict stays a plain dict.
 - On invalid data it raises `ValidationError` for the first invalid value only, and the error does not name the field.
 - A `@computed_field` that reads an unloaded field raises `NotLoadedFieldError`, and so does `model_dump()`, which serializes the computed field.
+- A field named `cls` is not supported: `elastic_create` builds the model with pydantic's `model_construct(cls, ...)`, which cannot take such a field either, so it raises `TypeError`. An unknown data key `cls` works as any other unknown key.
 
 Limit of `elastic_loaded_fields`:
 - With `extra='allow'`, pydantic validation puts a disallowed key that carries a field name into both `model_extra` and `model_fields_set`. So in a model built by the constructor or `model_validate`, that field counts as loaded even though it holds its default. Models built by `elastic_create` and `elastic_get_validated_model` are not affected.

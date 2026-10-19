@@ -1658,6 +1658,31 @@ def test_strict_validate_without_validate_reaches_nested_basemodel(inner_data):
     assert _validation_outcome(lambda: elastic_cls.elastic_create(data, validate=False, strict_validate=True)) == expected
 
 
+@pytest.mark.parametrize("extra", ["ignore", "allow"])
+@pytest.mark.parametrize("key", ["cls", "_fields_set"])
+def test_data_key_named_like_model_construct_parameter_matches_pydantic(key, extra):
+    """
+    `elastic_create` збирає модель через `model_construct(cls, _fields_set=None, **values)`, тож ключі `cls` і `_fields_set` збігаються з його параметрами.
+    Для моделі це звичайні невідомі ключі: результат той самий, що в `model_validate`, а сам ключ лежить в `elastic_extra`.
+    """
+    def build(base: type[BaseModel]) -> type[BaseModel]:
+        class Holder(base):
+            model_config = ConfigDict(extra=extra)
+            a: int
+
+        return Holder
+
+    data = {"a": 1, key: {"zzz"}}
+    reference = build(BaseModel).model_validate(data)
+
+    m = build(ElasticModel).elastic_create(data)
+
+    assert m.model_dump() == reference.model_dump()
+    assert m.model_extra == reference.model_extra
+    assert m.elastic_loaded_fields == reference.model_fields_set
+    assert m.elastic_extra == {key: {"zzz"}}
+
+
 # --------------------------
 # Публічний контракт: README як джерело підпису конструктора
 # --------------------------
