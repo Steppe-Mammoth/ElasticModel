@@ -791,7 +791,7 @@
 - [X] 22.0 **User Story:** Як розробник, що будує модель через
   `elastic_create`, я хочу отримувати від невалідних значень ту саму
   `ValidationError`, що й від pydantic, а код бібліотеки — без повторів і
-  мертвого коду, щоб його було легко читати й підтримувати [7/7].
+  мертвого коду, щоб його було легко читати й підтримувати [9/9].
   Знахідки рев'ю спрощень 2026-10-18; обсяг обрав автор.
   - [X] 22.1 Написати тест (10.5): контейнерне поле зі значенням не того
     типу відмовляє, як pydantic [verify: auto-test]
@@ -831,3 +831,14 @@
     3.10: 0 failed [verify: auto-test]
       → 3.13 + 2.11.7 і 3.13 + 2.14.1: 158 passed; 3.10 + 2.11.7 і 3.10 +
         2.14.1: 156 passed, 2 skipped [live] (2026-10-18)
+  - [X] 22.8 Написати тест (10.7): ключі даних `cls` і `_fields_set`, що
+    збігаються з параметрами `model_construct`, дають той самий результат,
+    що й `model_validate` [verify: auto-test]
+      → `test_data_key_named_like_model_construct_parameter_matches_pydantic`,
+        4 випадки; до 22.9 усі червоні (`TypeError` для `cls`, порожня модель
+        для `_fields_set`) [live] (2026-10-19)
+  - [X] 22.9 Не передавати такі ключі в `model_construct` у
+    `_construct_from_input`; CHANGELOG; прогнати набір на 3.13 і 3.10
+    [verify: auto-test]
+      → `_MODEL_CONSTRUCT_PARAMS`; 3.13 + 2.11.7 і 2.14.1: 162 passed; 3.10 +
+        2.11.7 і 2.14.1: 160 passed, 2 skipped [live] (2026-10-19)

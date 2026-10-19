@@ -123,6 +123,7 @@ doctest'и вимагають `email-validator` (через `EmailStr` в обо
 | 10.4 Рекурсивна модель (2026-10-18) | `auto-test` | unit | `children: list["Node"]`: часткові діти на двох рівнях. На Python 3.10 пропускається (рівень підтримки, FR-6) |
 | 10.5 Контейнерне поле зі значенням не того типу (2026-10-18) | `auto-test` | unit | `list[int] <- 5`, `list[int] <- "abc"`, `tuple[int, int] <- 5`, `dict[str, int] <- 5`, `set[int] <- 5`: `elastic_create` відмовляє `ValidationError` з тими самими типами помилок, що `model_validate` того самого класу на `BaseModel`. На 2026-10-18 — `TypeError`/`AttributeError`, а для рядка — `int_parsing` замість `list_type` |
 | 10.6 `strict_validate` у вкладеному `BaseModel` при `validate=False` (2026-10-18) | `auto-test` | unit | `elastic_create(..., validate=False, strict_validate=True)` з невалідним значенням у вкладеному `BaseModel` відмовляє з тим самим типом помилки, що `model_validate(..., strict=True)` того самого класу на `BaseModel`. На 2026-10-18 вкладена модель будується без перевірки |
+| 10.7 Ключ даних з іменем параметра `model_construct` (2026-10-19) | `auto-test` | unit | ключі `cls` і `_fields_set` × `extra` (`ignore`, `allow`): `elastic_create` дає той самий `model_dump()` і `model_extra`, що `model_validate` того самого класу на `BaseModel`, `elastic_loaded_fields` — те саме, що `model_fields_set` pydantic, а ключ лежить в `elastic_extra`. На 2026-10-19 `cls` дає `TypeError`, а `_fields_set` підміняє перелік заповнених полів, і поле з даних стає незавантаженим |
 
 ### README і фінальна перевірка (2026-10-15)
 
