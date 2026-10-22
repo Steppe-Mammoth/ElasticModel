@@ -43,9 +43,9 @@ ElasticModel поєднує найкраще з `BaseModel.model_validate` (ст
 
 ## Install
 ```bash
-pip install gostmodels
+pip install elasticmodel
 ```
-https://pypi.org/project/gostmodels/
+https://pypi.org/project/elasticmodel/
 
 Requires Python 3.11+.
 Python 3.10 is not blocked, but it is not supported. Known issue on 3.10: a model name written as a string inside a builtin generic is not resolved, so `elastic_create` raises `PydanticUserError`:
@@ -69,7 +69,7 @@ On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotat
 >>> from typing import Annotated
 >>> from datetime import datetime
 >>> from pydantic import Field, EmailStr
->>> from gostmodels import ElasticModel, NotLoadedFieldError
+>>> from elasticmodel import ElasticModel, NotLoadedFieldError
 >>> class Created(ElasticModel):
 ...     at: str
 ...     by: str
@@ -142,11 +142,11 @@ True
 ```python
 >>> from datetime import datetime
 >>> from pydantic import BaseModel, EmailStr, ValidationError
->>> from gostmodels import ElasticModel
+>>> from elasticmodel import ElasticModel
 >>> # Three ways to build an object from the same partial data:
 >>> #   1. pydantic.BaseModel.model_validate
 >>> #   2. pydantic.BaseModel.model_construct
->>> #   3. gostmodels.ElasticModel.elastic_create
+>>> #   3. elasticmodel.ElasticModel.elastic_create
 >>> # Two identical model pairs, one built on BaseModel and one on ElasticModel:
 >>> class CreatedPydantic(BaseModel):
 ...     at: str

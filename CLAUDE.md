@@ -1,4 +1,4 @@
-# gostmodels — правила проєкту
+# elasticmodel — правила проєкту
 
 ## `ElasticModel` лише розширює `BaseModel`
 

@@ -5,8 +5,10 @@
 # pytestmark = pytest.mark.filterwarnings("ignore:PydanticSerializationUnexpectedValue")
 
 from typing import Dict, List, Literal, Tuple, Union
+
 from pydantic import BaseModel, Field
-from gostmodels import ElasticModel
+
+from elasticmodel import ElasticModel
 
 # -----------------------------
 # 1) Chain of nested BaseModel
