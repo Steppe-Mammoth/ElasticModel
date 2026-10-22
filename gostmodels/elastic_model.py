@@ -535,26 +535,23 @@ class ElasticModel(BaseModel):
         Його зміна на модель не впливає.
         """
         model_fields = type(self).model_fields
-        fields = {name for name in self.model_fields_set if self._elastic_field_loaded(name)}
+        fields = {name for name in self.model_fields_set if self.elastic_is_loaded(name)}
         extra = {key for key in (self.model_extra or {}) if key not in model_fields}
         return fields | extra
 
     def elastic_is_loaded(self, name: str) -> bool:
         """
         Чи завантажене поле в цей інстанс: прийшло з даних (`elastic_create` чи валідація pydantic) або присвоєне пізніше.
-        """
-        if name in type(self).model_fields:
-            return self._elastic_field_loaded(name)
-        return name in (self.model_extra or {})
 
-    def _elastic_field_loaded(self, name: str) -> bool:
-        """
-        Поле завантажене, якщо воно в `model_fields_set` і досі присутнє в інстансі.
-
+        Оголошене поле завантажене, якщо воно в `model_fields_set` і досі присутнє в інстансі:
         - `model_fields_set` відрізняє дані від дефолту: pydantic кладе туди поля з вхідних даних і з присвоєнь, а дефолти — ні.
         - Присутність в `__dict__` потрібна, бо `model_fields_set` не реагує на `del`.
+
+        Невідомий ключ завантажений, якщо він є в `model_extra`.
         """
-        return name in self.model_fields_set and name in self.__dict__
+        if name in type(self).model_fields:
+            return name in self.model_fields_set and name in self.__dict__
+        return name in (self.model_extra or {})
     
     def elastic_is_valid(self, recursive: bool = True) -> tuple[bool, list[str]]:
         """
