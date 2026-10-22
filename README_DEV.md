@@ -19,7 +19,8 @@
    ```bash
    git config core.hooksPath .githooks
    ```
-   Хук бере python з `venv/`, якщо він є, інакше — `python` з оточення.
+   Хук проганяє тести двічі: на `venv/` (інакше на `python` з оточення) і на мінімальних версіях — Python 3.10, pydantic 2.11.0.
+   Для другого прогону потрібен [uv](https://docs.astral.sh/uv/): він сам завантажить Python 3.10.
    Разово обійти перевірку: `git push --no-verify`.
 
 ---

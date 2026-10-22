@@ -1,5 +1,5 @@
 dist/
-gostmodels.egg-info/
+elasticmodel.egg-info/
 __pycache__/
 venv/
 .pytest_cache/

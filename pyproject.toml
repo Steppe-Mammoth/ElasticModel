@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gostmodels"
+name = "elasticmodel"
 version = "0.3.0"
 description = "ElasticModel: a thin Pydantic v2 BaseModel wrapper for partial/nested data with lazy access—unloaded fields raise NotLoadedFieldError."
 authors = [
@@ -24,7 +24,7 @@ dependencies = [
 [tool.setuptools]
 # Пакет оголошений явно, бо автовиявлення flat-layout вважає top-level пакетом будь-який каталог у корені — зокрема службовий `tmp/` — і або падає з "Multiple top-level packages", або тягне сторонні файли у збірку.
 # Явний перелік робить вміст артефакту незалежним від сміття в корені.
-packages = ["gostmodels"]
+packages = ["elasticmodel"]
 
 [tool.pytest.ini_options]
 # Корінь проєкту у шляху імпорту: без цього bare `pytest` падає з ModuleNotFoundError, бо сам пакет у venv не встановлений, а консольний скрипт pytest не додає cwd у sys.path.
@@ -38,4 +38,4 @@ testpaths = ["tests", "README.md"]
 doctest_optionflags = ["IGNORE_EXCEPTION_DETAIL"]
 
 [project.urls]
-Homepage = "https://github.com/Steppe-Mammoth/GostModels" 
+Homepage = "https://github.com/Steppe-Mammoth/ElasticModel" 

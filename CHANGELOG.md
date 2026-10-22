@@ -2,11 +2,16 @@
 
 ## 0.3.0 — unreleased
 
+### Renamed to `elasticmodel`
+- The package, the PyPI project and the GitHub repository are renamed from `gostmodels` to `elasticmodel`.
+- Install with `pip install elasticmodel` and import with `from elasticmodel import ElasticModel`.
+- `gostmodels` on PyPI stays at 0.2.4 and receives no further releases.
+
 Changes are listed per story of EM-1 (the `ElasticModel` public contract), in the order they were made.
 A later story sometimes revises an earlier one; such entries say so, and the final behavior is described in the README.
 
 ### 1. `NotLoadedFieldError` for unloaded fields
-- Reading a declared field that was not loaded raises `NotLoadedFieldError`, exported from `gostmodels`. It subclasses `AttributeError`, so existing `except AttributeError` code keeps working.
+- Reading a declared field that was not loaded raises `NotLoadedFieldError`, exported from `elasticmodel`. It subclasses `AttributeError`, so existing `except AttributeError` code keeps working.
 - The message names the field and the model.
 - Undeclared names keep the standard pydantic behavior.
 

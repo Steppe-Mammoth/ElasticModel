@@ -19,7 +19,7 @@ from typing import Annotated, Any, Dict, Generic, List, Literal, Tuple, TypeVar,
 
 from pydantic import AliasChoices, AliasPath, EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict, create_model, field_validator, model_validator
 
-from gostmodels import ElasticModel
+from elasticmodel import ElasticModel
 
 
 # --------------------------
@@ -558,7 +558,7 @@ def test_not_loaded_field_error_exported_from_package():
     Імпорт зроблено локальним навмисно: на рівні модуля відсутній експорт обриває збирання всього файлу,
     і замість одного цільового падіння отримуємо помилку collection на всіх тестах набору.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     # Наявні тести очікують AttributeError на незавантаженому полі, тому базовий клас входить у контракт.
     assert issubclass(NotLoadedFieldError, AttributeError)
@@ -569,7 +569,7 @@ def test_unloaded_declared_field_raises_not_loaded_field_error():
     Оголошене поле, якого не було в даних при `defaults=False`, фізично відсутнє в інстансі,
     тому його читання має давати помилку бібліотеки, а не штатну помилку доступу.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     u = UserSlim.elastic_create({"created": {"at": "t", "by": "sys"}}, validate=False, defaults=False)
 
@@ -582,7 +582,7 @@ def test_undeclared_name_keeps_standard_access_behavior():
     Неоголошене ім'я перехоплювач пропускає далі: при `extra='allow'` повертається значення,
     при `extra='ignore'` лишається штатна помилка доступу — і вона не є помилкою бібліотеки.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     class UIgnore(ElasticModel):
         model_config = ConfigDict(extra='ignore')
@@ -605,7 +605,7 @@ def test_not_loaded_field_error_message_names_the_field():
     """
     NFR-3: повідомлення називає поле. Окремий тест, бо doctest під `IGNORE_EXCEPTION_DETAIL` текст повідомлення ігнорує.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     u = UserSlim.elastic_create({"created": {"at": "t", "by": "sys"}}, validate=False, defaults=False)
 
@@ -619,7 +619,7 @@ def test_interceptor_not_executed_when_reading_loaded_field():
     NFR-2 перевіряється структурно: перехоплювач спрацьовує лише після невдалого звичайного пошуку,
     тому читання завантаженого поля не виконує його коду.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     intercepted: list[str] = []
 
@@ -1137,7 +1137,7 @@ def test_elastic_create_on_frozen_model():
     """
     `elastic_create` будує frozen-модель: незавантажений дефолт прибирається без присвоєння, яке frozen-модель забороняє.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     class Frozen(ElasticModel):
         model_config = ConfigDict(frozen=True)
@@ -1262,7 +1262,7 @@ def test_elastic_create_supports_computed_field():
     """
     from pydantic import computed_field
 
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     def build(base: type[BaseModel]) -> type[BaseModel]:
         class Person(base):
@@ -1340,7 +1340,7 @@ def test_unfilled_key_lands_in_model_extra_as_in_pydantic(config, data):
     При `extra='allow'` pydantic кладе в `model_extra` і ключ, що не заповнив поле: заборонений конфігом або той, що програв аліасу.
     `elastic_create` дає той самий `model_extra`, а поле заповнює лише тоді, коли його заповнює pydantic.
     """
-    from gostmodels import NotLoadedFieldError
+    from elasticmodel import NotLoadedFieldError
 
     reference = _unfilled_key_class(BaseModel, **config).model_validate(data)
     filled = reference.id != "default"
