@@ -1,9 +1,13 @@
 #!/bin/sh
-# Перед push проганяє тести проєкту; якщо хоч один падає, push скасовується.
+# Перед push проганяє тести проєкту двічі; якщо хоч один прогін падає, push скасовується.
+#   1. На venv проєкту (поточна версія Python і pydantic).
+#   2. На мінімальних підтримуваних версіях: Python 3.10, pydantic 2.11.0, typing-extensions 4.12.2.
 # Разово обійти перевірку: `git push --no-verify`.
 #
 # Тести йдуть на робочому дереві, а не на комітах, що пушаться.
 # Тому незакомічені зміни впливають на результат.
+
+set -e
 
 # Інтерпретатор беремо з venv проєкту, якщо він є.
 # Push з IDE чи з терміналу без активованого venv інакше підхопив би системний python без залежностей.
@@ -13,5 +17,18 @@ else
     python=python
 fi
 
-echo "pre-push: запуск тестів"
-exec "$python" -m pytest -q
+echo "pre-push: тести на поточному оточенні"
+"$python" -m pytest -q
+
+# Версії мають збігатися з нижніми межами в `pyproject.toml` (requires-python і dependencies).
+# `uv` ставить потрібний Python сам, а `--no-project` не дає йому створити `.venv` у репозиторії.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-push: для тестів на Python 3.10 потрібен uv (https://docs.astral.sh/uv/), або пуште з --no-verify" >&2
+    exit 1
+fi
+
+echo "pre-push: тести на мінімальних версіях (Python 3.10, pydantic 2.11.0)"
+uv run --no-project --python 3.10 \
+    --with "pydantic==2.11.0" --with "typing-extensions==4.12.2" \
+    --with pytest --with email-validator \
+    python -m pytest -q -p no:cacheprovider
