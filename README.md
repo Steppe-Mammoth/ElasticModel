@@ -48,15 +48,7 @@ pip install elasticmodel
 https://pypi.org/project/elasticmodel/
 
 Requires Python 3.11+.
-Python 3.10 is not blocked, but it is not supported. Known issue on 3.10: a model name written as a string inside a builtin generic is not resolved, so `elastic_create` raises `PydanticUserError`:
-
-```python
-class Node(ElasticModel):
-    name: str
-    children: list["Node"] = []   # Python 3.10: elastic_create -> PydanticUserError
-```
-
-On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotations` at the top of the module.
+Python 3.10 is not blocked, but it is not supported. Known issue on 3.10: a model name written as a string inside a builtin generic is not resolved
 
 ---
 
@@ -73,6 +65,7 @@ On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotat
 >>> class Created(ElasticModel):
 ...     at: str
 ...     by: str
+...
 ...     def datetime_from_at(self) -> datetime:
 ...         return datetime.strptime(self.at, "%Y-%m-%d")
 ...
@@ -83,6 +76,7 @@ On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotat
 ...     email: EmailStr
 ...     created: Created
 ...     updated: Created
+...
 ...     def welcome(self) -> str:
 ...         return f"Hi {self.first_name} {self.last_name}! Joined at {self.created.datetime_from_at()}"
 ...
@@ -97,29 +91,36 @@ On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotat
 ...     "updated": {"at": "2099-01-10"},
 ...     "external_value": 1,
 ... }
+
 >>> # --------MAIN CONSTRUCTOR-------
 >>> u = User.elastic_create(doc)
 >>> # -------------------------------
 >>> u.id                      # Alias works
 'u1'
+
 >>> # .elastic_extra is a plain dict holding every unknown key, kept without validation
 >>> u.elastic_extra
 {'external_value': 1}
+
 >>> # The nested model is constructed, so its methods work on the data that IS loaded
 >>> u.created.datetime_from_at()
 datetime.datetime(2025, 8, 15, 0, 0)
+
 >>> print(u.welcome())
 Hi Ann Lee! Joined at 2025-08-15 00:00:00
+
 >>> # Accessing a declared but not loaded field raises NotLoadedFieldError
 >>> u.created.by
 Traceback (most recent call last):
 NotLoadedFieldError: Field 'by' is declared in Created but was not loaded into this instance
+
 >>> # .elastic_is_loaded(name) - safe check for field presence, it never raises
 >>> u.created.elastic_is_loaded("by")
 False
 >>> u.created.by = "system"   # Assigning to a field marks it as loaded
 >>> u.created.elastic_is_loaded("by")
 True
+
 >>> # Choose the validation depth when you need it.
 >>> # shallow (recursive=False) does not descend into nested models
 >>> u.elastic_is_valid(recursive=False)
@@ -127,6 +128,7 @@ True
 >>> # deep (recursive=True) descends and finds the field still missing in "updated"
 >>> u.elastic_is_valid(recursive=True)
 (False, ['updated.by'])
+
 >>> # Produce a fully validated instance of the same model class (Self), or raise ValidationError
 >>> u.updated.by = "user"     # Fill the gap first, otherwise validation raises
 >>> validated = u.elastic_get_validated_model(recursive=True)
@@ -170,10 +172,12 @@ True
 ...
 >>> # Equally limited data, but enough for the actions we need: "by" is missing.
 >>> partial_data = {"email": "a@b.com", "created": {"at": "2025-08-15"}}
+
 >>> # 1. pydantic.model_validate -> raises immediately
 >>> UserPydantic.model_validate(partial_data)
 Traceback (most recent call last):
 ValidationError: 1 validation error for UserPydantic
+
 >>> # 2. pydantic.model_construct -> does not validate, but keeps nested dicts
 >>> user_construct = UserPydantic.model_construct(**partial_data)
 >>> isinstance(user_construct.created, dict)   # a raw dict, so CreatedPydantic methods are not there
@@ -181,6 +185,7 @@ True
 >>> user_construct.created.datetime_from_at()
 Traceback (most recent call last):
 AttributeError: 'dict' object has no attribute 'datetime_from_at'
+
 >>> # 3. ElasticModel.elastic_create -> no instant failure, and nested models are built
 >>> user_elastic = UserElastic.elastic_create(partial_data)
 >>> isinstance(user_elastic.created, CreatedElastic)
