@@ -48,7 +48,7 @@ pip install elasticmodel
 https://pypi.org/project/elasticmodel/
 
 Requires Python 3.11+.
-Python 3.10 is not blocked, but it is not supported. Known issue on 3.10: a model name written as a string inside a builtin generic is not resolved
+Python 3.10 is not blocked, but it is not supported: a model name written as a string inside a builtin generic is not resolved there. See [Python 3.10](#python-310).
 
 ---
 
@@ -279,3 +279,18 @@ Limits of `elastic_create`:
 
 Limit of `elastic_loaded_fields`:
 - With `extra='allow'`, pydantic validation puts a disallowed key that carries a field name into both `model_extra` and `model_fields_set`. So in a model built by the constructor or `model_validate`, that field counts as loaded even though it holds its default. Models built by `elastic_create` and `elastic_get_validated_model` are not affected.
+
+
+---
+
+## Python 3.10
+
+Python 3.10 is not blocked, but it is not supported. Known issue: a model name written as a string inside a builtin generic is not resolved, so `elastic_create` raises `PydanticUserError`:
+
+```python
+class Node(ElasticModel):
+    name: str
+    children: list["Node"] = []   # Python 3.10: elastic_create -> PydanticUserError
+```
+
+On 3.10 use `List["Node"]` from `typing`, or put `from __future__ import annotations` at the top of the module.
