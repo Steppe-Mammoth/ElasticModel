@@ -4,14 +4,38 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gostmodels"
-version = "0.2.4"
+version = "0.3.0"
 description = "ElasticModel: a thin Pydantic v2 BaseModel wrapper for partial/nested data with lazy access—unloaded fields raise NotLoadedFieldError."
 authors = [
     { name="Steppe_Mammoth", email="qwqwqww505@yahoo.com" }
 ]
 readme = "README.md"
+# Офіційна підтримка — Python 3.11+, але 3.10 навмисно не заблокований: пакет на ньому ставиться й працює, крім одного відомого обмеження, описаного в README.
 requires-python = ">=3.10"
 license = {text = "MIT"}
+dependencies = [
+    # Нижня межа зумовлена кодом, а не вибором: `elastic_get_validated_model` викликає `model_validate(..., by_alias=..., by_name=...)`, і цих параметрів до 2.11 не існує.
+    "pydantic>=2.11,<3",
+    # Модуль імпортує `Self` з `typing_extensions` напряму, тому залежність оголошена явно.
+    # Межа та сама, яку вимагає pydantic 2.11, тож в оточенні користувача нічого нового не з'являється.
+    "typing-extensions>=4.12.2",
+]
+
+[tool.setuptools]
+# Пакет оголошений явно, бо автовиявлення flat-layout вважає top-level пакетом будь-який каталог у корені — зокрема службовий `tmp/` — і або падає з "Multiple top-level packages", або тягне сторонні файли у збірку.
+# Явний перелік робить вміст артефакту незалежним від сміття в корені.
+packages = ["gostmodels"]
+
+[tool.pytest.ini_options]
+# Корінь проєкту у шляху імпорту: без цього bare `pytest` падає з ModuleNotFoundError, бо сам пакет у venv не встановлений, а консольний скрипт pytest не додає cwd у sys.path.
+pythonpath = ["."]
+# Збирання doctest обмежене саме README.md.
+# Якби тут стояло `*.md`, під збирання потрапило б дерево `tasks/`, і будь-який `>>>` у майбутньому PRD чи дизайні став би тестом.
+addopts = "--doctest-glob=README.md"
+testpaths = ["tests", "README.md"]
+# Єдиний прапорець, і він потрібен, щоб у README стояло коротке ім'я помилки замість повного шляху модуля.
+# Ім'я класу виключення прапорець усе одно зіставляє, а кожен додатковий прапорець послаблював би перевірку, тому інших немає.
+doctest_optionflags = ["IGNORE_EXCEPTION_DETAIL"]
 
 [project.urls]
 Homepage = "https://github.com/Steppe-Mammoth/GostModels" 

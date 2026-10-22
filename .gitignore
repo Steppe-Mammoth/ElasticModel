@@ -2,3 +2,13 @@ dist/
 gostmodels.egg-info/
 __pycache__/
 venv/
+.pytest_cache/
+
+# Локальні артефакти embo: стан RLM-індексу та capture-логи команд
+.claude/rlm_state/
+tmp/
+
+# Особисті налаштування та логи Claude Code.
+# Спільні налаштування проєкту (.claude/settings.json) не ігноруються і можуть комітитись.
+.claude/settings.local.json
+.claude/corrections.jsonl
