@@ -6,6 +6,8 @@ ElasticModel is a wrapper around `pydantic.BaseModel`(v2) designed to simplify w
 
 > Pydantic’s `model_validate()` requires all required fields. `model_construct()` allows partials but keeps nested dicts as raw dicts. ElasticModel combines the best of both.
 
+![pydantic.BaseModel vs ElasticModel on partial data](https://raw.githubusercontent.com/Steppe-Mammoth/ElasticModel/master/docs/demo/comparison.gif)
+
 **Core features of ElasticModel:**
 - ✅ Inherits the behavior of `pydantic.BaseModel`: code written for `BaseModel` keeps working after you replace it with `ElasticModel`, and the new features come as separate `elastic_*` methods. The few deliberate differences are listed in [Differences from BaseModel](#differences-from-basemodel).
 - ✅ Allows creating models from incomplete data, providing full access — read fields, call methods, even on nested models.

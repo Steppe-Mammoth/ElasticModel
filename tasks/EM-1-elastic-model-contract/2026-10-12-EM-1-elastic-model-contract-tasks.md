@@ -3,13 +3,14 @@
 ## Relevant Files
 
 - [2026-10-10-EM-1-elastic-model-contract-prd.md](./2026-10-10-EM-1-elastic-model-contract-prd.md)
-  :: EM-1 - Product Requirements Document, 39 розбіжностей контракту
+  :: EM-1 - Product Requirements Document, 41 розбіжність контракту
 - [2026-10-11-EM-1-elastic-model-contract-tech-design.md](./2026-10-11-EM-1-elastic-model-contract-tech-design.md)
-  :: EM-1 - Technical Design, механізм перехоплення та 19 компонентів
+  :: EM-1 - Technical Design, механізм перехоплення та 22 компоненти
 - [2026-10-12-EM-1-test-plan.md](./2026-10-12-EM-1-test-plan.md)
   :: EM-1 - Test Plan, джерело теґів `[verify: ...]` для цього списку
-- [gostmodels/elastic_model.py](../../gostmodels/elastic_model.py)
-  :: Єдиний модуль реалізації. Усі зміни коду тут: новий клас помилки,
+- [elasticmodel/elastic_model.py](../../elasticmodel/elastic_model.py)
+  :: Єдиний модуль реалізації (до 0.3.0 пакет називався `gostmodels`). Усі
+  зміни коду тут: новий клас помилки,
   `__getattr__`, фільтр у `__setattr__:399-406`, копія у властивості
   `:321-323`, умова аліасів `:251`, імпорт `Self` `:43`. З 2026-10-14:
   таблиця вхідних ключів, after-валідатор обліку, копія `elastic_extra`,
@@ -18,12 +19,15 @@
   поточного стану, адаптер поля з `FieldInfo` і конфігом, правила
   `validation_alias`, паритет `model_extra`. З 2026-10-18: спільне збирання
   `_construct_from_input`, параметри `_CreateOptions`, обхід лише
-  контейнерних входів
-- [gostmodels/__init__.py](../../gostmodels/__init__.py)
+  контейнерних входів. З 2026-10-23 (FR-16): `_field_annotation`, спільний
+  помічник адаптера, `_elastic_build_model`, параметр `owner`,
+  `_union_tag_table`, `_elastic_build_union`, `_elastic_branch_accepts`
+- [elasticmodel/__init__.py](../../elasticmodel/__init__.py)
   :: Публічний експорт пакета. Додається реекспорт класу помилки
 - [README.md](../../README.md)
   :: Фактичний публічний контракт пакета на PyPI. Дванадцять місць правок,
-  два приклади переводяться у формат doctest
+  два приклади переводяться у формат doctest. З 2026-10-23 місця 17 і 19
+  FR-7 переписуються під `Optional`/`Union` (історія 26.0)
 - [CHANGELOG.md](../../CHANGELOG.md)
   :: Release notes 0.3.0, окремий запис на кожну історію EM-1 у порядку
   виконання (на вимогу автора 2026-10-17)
@@ -65,6 +69,11 @@
   першою, бо на обліку зі стану pydantic тримаються решта; 15.0 перед
   16.0, бо без нового payload ключ із `model_extra` заповнив би поле;
   README (19.0) після коду; 20.0 остання.
+- Історії 23.0-27.0 (2026-10-23) додають FR-16: часткові дані в `Optional`/
+  `Union` (issue #1 і #2). Порядок: 23.0 (підготовка без зміни поведінки)
+  першою, 24.0 перед 25.0, README (26.0) після коду, 27.0 остання. Рядки
+  `U.*` у дужках - Story 10 test-plan. Файли кодів тепер у `elasticmodel/`
+  (пакет перейменовано), а не в `gostmodels/`.
 - Тест поведінки, що має збігатися з pydantic, порівнює результат із тим
   самим класом на `BaseModel`, а не з вписаним вручну очікуванням
   (`CLAUDE.md`). Номери тестів у дужках - рядки test-plan.
@@ -842,3 +851,162 @@
     [verify: auto-test]
       → `_MODEL_CONSTRUCT_PARAMS`; 3.13 + 2.11.7 і 2.14.1: 162 passed; 3.10 +
         2.11.7 і 2.14.1: 160 passed, 2 skipped [live] (2026-10-19)
+
+- [ ] 23.0 **User Story:** Як розробник бібліотеки, я хочу підготувати обхід
+  вкладених моделей до підтримки `Union` без зміни поведінки, щоб наступні
+  історії додавали лише нову гілку, а набір тестів лишався зеленим (FR-16,
+  компонент 22, порядок). Виконується першою [0/6]
+  - [ ] 23.1 Прогнати повний набір до змін і записати базову кількість
+    тестів [verify: auto-test]
+  - [ ] 23.2 Винести складання анотації поля з `_field_adapter` у
+    `_field_annotation(cls, name)` з `lru_cache`: без кешу кожен виклик
+    давав би нову анотацію з новим `Field(discriminator=...)` і кеш таблиці
+    тегів не влучав би (tech-design, Review 2026-10-23, знахідка 7). Окремого
+    тесту на кеш немає (test-plan, Intentional Gaps); перевірка - наявні
+    тести зелені [verify: auto-test]
+  - [ ] 23.3 Винести створення `TypeAdapter` з конфігом моделі та винятком
+    `type-adapter-config-unused` зі `_field_adapter` у спільний помічник
+    (ім'я - за місцем, наприклад `_type_adapter(owner, annotation)`)
+    [verify: auto-test]
+  - [ ] 23.4 Винести `_elastic_build_model` зі спільної гілки моделей
+    `_elastic_prepare_value`. Поведінка не змінюється: `BaseModel` з
+    валідацією, як і раніше, віддає `dict` адаптеру поля
+    [verify: auto-test]
+  - [ ] 23.5 Додати параметр `owner` у `_elastic_prepare_value`.
+    `_elastic_coerce_value(cls, name, ...)` бере анотацію сама
+    (`_field_annotation(cls, name)`) і передає `owner=cls`; для вкладеного
+    `BaseModel` це `_field_annotation(base, name)`; рекурсивні виклики
+    (елементи `list`, значення `dict`, вкладені моделі) передають `owner`
+    власника поля [verify: auto-test]
+  - [ ] 23.6 Прогнати повний набір: усі наявні тести зелені без змін
+    [verify: auto-test]
+
+- [ ] 24.0 **User Story:** Як розробник, у чиїй моделі є `Optional` або
+  дискримінований `Union` вкладених моделей, я хочу щоб `elastic_create`
+  будував їх з часткових даних за тегом, як обирає pydantic, щоб закрити
+  issue #1 і #2 (FR-16, US-10, test-plan U.1-U.3, U.8-U.10) [0/9]
+  - [ ] 24.1 Написати тест (U.10) як охоронний: `model_validate` і
+    конструктор на класі з полем дискримінованого й звичайного `Union` дають
+    ті самі результат і помилки, що клас на `BaseModel`. Зелений до змін і
+    після [verify: auto-test]
+  - [ ] 24.2 Переписати наявний тест
+    `test_discriminated_union_validate_false_keeps_raw`
+    (`tests/test_elastic_model.py:324`): він вимагає `dict` при
+    `validate=False`, а FR-16 вимагає модель обраної гілки. Тут же написати
+    тест (U.1) на тих самих `Card`/`Bank`/`Payment`: сценарії issue #1 і #2,
+    гілки `ElasticModel` і `BaseModel` × `validate=True`/`False`, результат
+    як у прямого поля [verify: auto-test]
+  - [ ] 24.3 Написати тест (U.8): `Optional[X]` як `X` - `Optional[Card]`,
+    `None`, `Optional[list[Card]]`, `Optional[dict[str, Card]]`; дискримінований
+    `Union` усередині `Optional` у трьох формах (`Optional[Annotated[U,
+    Field(discriminator=...)]]`, `Annotated[Optional[U], Field(...)]`,
+    `Optional[U] = Field(discriminator=...)`); одна з форм записана як
+    `Card | Bank | None` (`types.UnionType`) [verify: auto-test]
+  - [ ] 24.4 Написати тест (U.2): форми тегу - рядок, callable
+    `Discriminator` з `Tag`, аліас, `Enum`-тег, рекурсивна гілка; без тегу і
+    з невідомим тегом (тип помилки pydantic / `dict` без валідації)
+    [verify: auto-test]
+  - [ ] 24.5 Написати тест (U.3): код чужої гілки не виконується -
+    `model_post_init` необраної гілки не викликано, `Card` з after-валідатором
+    дає те саме, що пряме поле [verify: auto-test]
+  - [ ] 24.6 Написати тест (U.9): `defaults=True` і `strict_validate=True`
+    доходять до гілки; `list[Annotated[U, disc]]` будує кожен елемент
+    [verify: auto-test]
+  - [ ] 24.7 Реалізувати рекурсію `Optional[X]` у `_elastic_prepare_value`
+    (рівно один член, що не `NoneType`; `typing.Union` і `types.UnionType`).
+    Верифікується частиною 24.3 без дискримінованого `Union`
+    [verify: auto-test]
+  - [ ] 24.8 Реалізувати вибір гілки дискримінованого `Union`
+    (`_elastic_build_union`, дизайн, компонент 22): `_union_tag_table(owner,
+    annotation)` з кешем за «`owner`, анотація» і падінням назад без кешу при
+    `TypeError`, форма вузла `tagged-union` - рядок «Таблиця тегів у
+    `core_schema`» таблиці властивостей; тег зі значення (шляхи ключів або
+    callable), клас з таблиці з порівнянням `Enum`; не знайдений вузол чи тег
+    - значення як є. `_elastic_build_model` отримує режим гілки `Union`:
+    `BaseModel` з валідацією - `model_validate(value, strict=options.strict)`,
+    а пряме поле, як і раніше, віддає `dict` адаптеру. Тут же оновити
+    докстрінг `_elastic_prepare_value` (прибрати «`Optional` і `Union` не
+    обходяться») [verify: auto-test]
+  - [ ] 24.9 Прогнати повний набір: 0 failed, а Story 10 (U.1-U.3, U.8-U.10)
+    ще й на pydantic 2.11.0 через `uv`, бо код читає `core_schema`
+    [verify: auto-test]
+
+- [ ] 25.0 **User Story:** Як розробник, у чиїй моделі є звичайний `Union`
+  моделей, я хочу щоб гілка обиралась за правилом smart mode pydantic і не
+  залежала від `validate`, щоб часткові дані потрапляли у правильну модель
+  (FR-16, US-10, test-plan U.4-U.7, U.11) [0/9]
+  - [ ] 25.1 Написати тест (U.4): правило звичайного `Union` на часткових
+    даних, з явним очікуваним класом - `{"kind": "bank"}` → `Bank` за обох
+    `validate`; гілки-`BaseModel` без валідації; рівність → ліва; більше
+    полів перемагає; повна гілка перемагає неповну; один з випадків записаний
+    як `Card | Bank`; без валідації, коли значення відкидає кожна гілка,
+    будується перша за порядком зі значеннями як є [verify: auto-test]
+  - [ ] 25.2 Написати тест (U.5): паритет з pydantic на прийнятих ним
+    даних - `Union[Long, Short]`, `Union[ForbidA, PlainX]`,
+    `Union[dict, Card]` і `Union[Card, dict]`, `Union[str, Card]`; конфіг
+    власника діє на гілки-не-моделі: `Union[ArbitraryType, Card]` з
+    `arbitrary_types_allowed=True` і `TypedDict` як гілка-не-модель
+    [verify: auto-test]
+  - [ ] 25.3 Написати тест (U.6): задокументовані розширення -
+    `Union[IntX, StrX]` → `IntX`, `Union[VA, VB]` → помилка валідатора `VA`
+    [verify: auto-test]
+  - [ ] 25.4 Написати тест (U.7): коли не підійшла жодна гілка, помилка
+    дорівнює помилці прямого поля першої гілки (`Optional[Card]` і звичайний
+    `Union`) [verify: auto-test]
+  - [ ] 25.5 Написати тест (U.11): `elastic_is_valid` і
+    `elastic_get_validated_model` з частковою гілкою `Union` - шляхи
+    збігаються з `loc` `model_validate` на `BaseModel`; після присвоєння
+    поля - валідно [verify: auto-test]
+  - [ ] 25.6 Реалізувати розклад гілок (зняти `Annotated`, пропустити
+    `NoneType`, розділити на моделі й не-моделі), лічбу заповнених полів
+    `set(_input_key_map(гілка).filling_keys(значення).values())` без
+    екземплярів, порядок «повні, більше полів, ліва» і правило `forbid`;
+    будується перша за порядком гілка без перевірки значень. Верифікується
+    частиною 25.1: рівність, більше полів, повна перемагає, `forbid`
+    [verify: auto-test]
+  - [ ] 25.7 Реалізувати гілку-не-модель, що приймає `dict`: адаптер з
+    `owner` і `strict=options.strict`, з кешем за «`owner`, анотація» і
+    падінням назад при `TypeError`; для `TypedDict` без `config`. Верифікується
+    25.2 [verify: auto-test]
+  - [ ] 25.8 Реалізувати `_elastic_branch_accepts` (валідація наявних
+    значень полів через `_elastic_coerce_value` з `validate=True` і
+    `defaults=False`, без створення екземпляра), вибір першої прийнятої
+    гілки (при одній гілці-моделі перевірка пропускається) і помилку
+    першої гілки. Верифікується 25.1 (`{"kind": "bank"}`), 25.3, 25.4, 25.5
+    [verify: auto-test]
+  - [ ] 25.9 Прогнати повний набір: 0 failed [verify: auto-test]
+
+- [ ] 26.0 **User Story:** Як розробник, що читає README, я хочу щоб він
+  описував правила вибору гілки `Optional`/`Union` і їхні межі, щоб
+  розширення над pydantic було відоме з документації (FR-7, місця 17 і 19,
+  test-plan R.4). Виконується після 24.0 і 25.0 [0/5]
+  - [ ] 26.1 README, місце 17: `Optional[X]` поводиться як `X`; правила
+    вибору гілки як розширення; гілку-не-модель, що приймає `dict`, вирішує
+    pydantic; порада дискримінованого `Union` для часткових даних; межі
+    компонента 22 (точність збігу, валідатори класу гілки, валідатори
+    `Annotated` у перевірці без валідації, дані повні для іншої гілки,
+    дискримінований `Union` як член ширшого). Місце 19: прибрати межу «не
+    діють на `Optional`/`Union`» і сказати, що `defaults` та
+    `strict_validate` доходять до гілок [verify: code-only]
+  - [ ] 26.2 Докстрінг `elastic_create`: `validate=False` і звичайний
+    `Union` (значення перевіряються для вибору гілки, в модель потрапляють як
+    є) [verify: code-only]
+  - [ ] 26.3 CHANGELOG: запис `### 23.` про `Optional`/`Union` в
+    `elastic_create`, у порядку виконання історій [verify: code-only]
+  - [ ] 26.4 README-doctest зелений [verify: auto-test]
+  - [ ] 26.5 Пройти чекліст R.4 test-plan [verify: code-only]
+
+- [ ] 27.0 **User Story:** Як користувач пакета, я хочу щоб зміни FR-16 були
+  перевірені на мінімальній і поточній версіях pydantic, щоб читання
+  `core_schema` не зламалось непомітно (test-plan F.1). Виконується
+  останньою [0/4]
+  - [ ] 27.1 Прогнати повний набір, зокрема Story 10, на pydantic 2.11.0
+    через `uv`: 0 failed [verify: manual-run-claude]
+  - [ ] 27.2 Прогнати повний набір на Python 3.13 з pydantic 2.11.7 і
+    2.14.1: 0 failed [verify: auto-test]
+  - [ ] 27.3 Прогнати набір на `cpython-3.10` через `uv` з pydantic 2.11.7 і
+    2.14.1: 0 failed, тести з `list["X"]` пропущені
+    [verify: manual-run-claude]
+  - [ ] 27.4 Записати підсумок прогонів 27.1-27.3 у Notes цього списку
+    [verify: code-only]
+
