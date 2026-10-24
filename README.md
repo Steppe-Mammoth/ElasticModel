@@ -211,7 +211,7 @@ Summary:
   - Tracks actually loaded fields in `model.elastic_loaded_fields`
   - `defaults=True` applies `default`/`default_factory` to missing fields; those fields are **not** counted as loaded, so `elastic_is_loaded` still reports `False` for them. A default of a field with `validate_default` is validated, as in pydantic
   - `strict_validate=True` validates in pydantic strict mode, without coercion: `"5"` is not turned into `5`. It turns validation on even with `validate=False`, nested `BaseModel` included
-  - `defaults` and `strict_validate` reach nested `ElasticModel` in direct fields and inside containers. They do not reach `Optional`/`Union` fields
+  - `defaults` and `strict_validate` reach nested `ElasticModel` at every level: direct fields, containers and the branches of `Optional`/`Union` fields
 
 - Strict read access
   - Accessing an unloaded declared field raises `NotLoadedFieldError`
@@ -229,6 +229,7 @@ Summary:
   - Nested `ElasticModel` fields are built via `elastic_create`
   - `list`/`set`/`tuple` items are coerced recursively (when `validate=True`)
   - `dict[K, V]` keys and values are validated (when `validate=True`)
+  - `Optional` and `Union` fields get partial models too, see [Optional and Union fields](#optional-and-union-fields)
 
 ---
 
@@ -261,6 +262,46 @@ A nested `BaseModel` built with `validate=False` uses the same rules. It has no 
 
 ---
 
+## Optional and Union fields
+
+`elastic_create` builds a partial model inside `Optional` and `Union` fields too. Pydantic cannot do this: it validates a `Union` branch in full, so partial data fits no branch.
+
+- `Optional[X]` works exactly like `X`: a partial dict, a list of partial dicts, a discriminated `Union` inside.
+- **Discriminated `Union`** (`Field(discriminator=...)` or `Discriminator(...)`) picks the branch by the tag in the data, using the tag table pydantic itself builds. Only that branch is built: `model_post_init` and validators of the other branches never run. Without a tag, or with an unknown one, the value stays as is: with validation pydantic raises `union_tag_not_found` / `union_tag_invalid`, without validation the field keeps the dict.
+- **Plain `Union`** picks the branch by a rule close to pydantic's smart mode. The rule is the same for `validate=True` and `validate=False`: the present values are checked even without validation, but they land in the model as is.
+  1. If a non-model branch accepts a dict (`dict`, `Any`, a `TypedDict`), pydantic decides and the value is passed on as is.
+  2. A model branch drops out if it rejects one of the present values, if the data fills none of its fields, or if it has `extra='forbid'` and the data has keys it does not know.
+  3. Of the rest, complete branches (all required fields present) come first, then the branch with more filled fields, then the leftmost one.
+  4. If every branch rejects the values, the first one is built: with validation it raises the same error as a direct field of that class, without validation it gets the values as is.
+- `defaults` and `strict_validate` reach the chosen branch, as in a direct field.
+- A plain `BaseModel` branch with validation is left to pydantic, as a direct `BaseModel` field is: it cannot take partial data anyway, so the result and the errors are exactly pydantic's.
+
+For partial data prefer a discriminated `Union`: the tag leaves nothing to guess.
+
+```python
+>>> from typing import Literal, Union
+>>> class Card(ElasticModel):
+...     kind: Literal["card"]
+...     pan: str
+...     holder: str
+...
+>>> class Bank(ElasticModel):
+...     kind: Literal["bank"]
+...     iban: str
+...
+>>> class Payment(ElasticModel):
+...     method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+...
+>>> p = Payment.elastic_create({"method": {"kind": "card", "holder": "Ann"}})
+>>> type(p.method).__name__
+'Card'
+>>> sorted(p.method.elastic_loaded_fields)
+['holder', 'kind']
+
+```
+
+---
+
 ## Differences from BaseModel
 
 An `ElasticModel` built the usual pydantic way (constructor, `model_validate`, `model_construct`, copies) behaves exactly like a `BaseModel`. The differences below are deliberate.
@@ -269,10 +310,18 @@ Extensions:
 - `extra='forbid'` — `elastic_create` does not reject unknown keys: they land in `.elastic_extra`. Pydantic validation (constructor, `model_validate`) still rejects them.
 - `==` also compares `.elastic_extra`: models with the same data but different `.elastic_extra` are not equal.
 - `elastic_get_validated_model` keeps `.elastic_extra` in the copy, so a valid model equals its validated copy.
+- Partial data in `Optional`/`Union` fields, see [Optional and Union fields](#optional-and-union-fields). Data that pydantic accepts gets the same branch, except for the plain `Union` cases below.
+
+Limits of the plain `Union` rule:
+- Exactness is not used. `Union[IntX, StrX]` with `{"x": "1"}` gives `IntX`, the first branch that accepts `"1"`; pydantic gives `StrX`, the exact type match.
+- Class validators of a branch take no part in the choice. If an after-validator of `VA` rejects the data in `Union[VA, VB]`, the result is `VA` and then the validator error; pydantic falls back to `VB`.
+- The check of present values runs `Annotated` validators of branch fields, and builds the nested models of a branch, so their `wrap`/`after` validators and `model_post_init` run too — even with `validate=False`. This applies only to a plain `Union` with several model branches. Such code must not raise anything but a validation error, and must not read fields that may be unloaded: any other exception, `NotLoadedFieldError` included, propagates from `elastic_create` even with `validate=False`.
+- Data that is complete for another branch goes to that branch, as in pydantic. In `Union[Long, Short]`, data with every field `Short` needs gives `Short`, even if you meant a partial `Long`.
+- A discriminated `Union` used as a member of a wider `Union` (not `Optional`) is treated as plain: its tag does not pick the branch, though a `Literal` tag still rules out the other branches in the check.
+- Only a dict value picks a branch. Any other value in a `Union` that is not `Optional` is passed to pydantic as is, so `Union[list[Item], int]` with a list of partial dicts fails as in pydantic. `Optional[list[Item]]` works.
 
 Limits of `elastic_create`:
 - Class validators (`@field_validator`, `@model_validator`) do not run. They run in `elastic_get_validated_model()` and `model_validate()`. One exception comes from pydantic itself: a nested model is built first and then passed into its field as a ready instance, and pydantic runs `@model_validator(mode='wrap')` and `mode='after'` on any instance in a field. So such a validator on a nested model runs on the partial instance and must not read fields that may be unloaded.
-- Partial data is not supported inside `Optional`/`Union` fields: with `validate=True` pydantic validates the value in full, so a partial dict raises `ValidationError`; with `validate=False` the dict stays a plain dict.
 - On invalid data it raises `ValidationError` for the first invalid value only, and the error does not name the field.
 - A `@computed_field` that reads an unloaded field raises `NotLoadedFieldError`, and so does `model_dump()`, which serializes the computed field.
 - A field named `cls` is not supported: `elastic_create` builds the model with pydantic's `model_construct(cls, ...)`, which cannot take such a field either, so it raises `TypeError`. An unknown data key `cls` works as any other unknown key.
