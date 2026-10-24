@@ -104,3 +104,11 @@ A later story sometimes revises an earlier one; such entries say so, and the fin
 - `strict_validate=True` with `validate=False` now validates a nested `BaseModel` too, as it does for a direct field. The limit is removed from README.
 - Data keys `cls` and `_fields_set` are treated as ordinary unknown keys, as in pydantic. Before, `cls` raised `TypeError`, and `_fields_set` made the fields from the data count as not loaded. A field named `cls` is still not supported, as in pydantic's `model_construct`; README lists the limit.
 - Internal: one construction path for `elastic_create` and for a nested `BaseModel` built without validation, the constructor parameters in one object, unused code removed.
+
+### 23. Partial data in `Optional` and `Union` fields
+- `elastic_create` builds a partial model inside `Optional` and `Union` fields (issues #1 and #2). Before, a partial dict raised `ValidationError` with `validate=True` and stayed a dict with `validate=False`.
+- `Optional[X]` works like `X`, including `Optional[list[X]]` and a discriminated `Union` inside `Optional`.
+- A discriminated `Union` picks the branch by the tag, using pydantic's own tag table, and runs no code of the other branches.
+- A plain `Union` picks the branch by a rule close to pydantic's smart mode, the same with and without validation. README lists where it differs from pydantic.
+- `defaults` and `strict_validate` reach the branches of `Optional`/`Union` fields.
+- A plain `BaseModel` branch with validation is left to pydantic, as a direct `BaseModel` field is, so its result and errors are pydantic's.

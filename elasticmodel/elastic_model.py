@@ -41,12 +41,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from types import MappingProxyType
+from types import MappingProxyType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
     TypeVar,
+    Union,
     get_args,
     get_origin,
 )
@@ -55,12 +56,14 @@ from pydantic import (
     AliasChoices,
     AliasPath,
     BaseModel,
+    Discriminator,
     Field,
     PrivateAttr,
     PydanticUserError,
     TypeAdapter,
     ValidationError,
 )
+from pydantic.fields import FieldInfo
 
 # `Self` береться з `typing_extensions`, бо в `typing` він з'явився лише в 3.11, а пакет підтримує 3.10.
 # Імпорт рантаймовий, а не під `TYPE_CHECKING`: інакше `typing.get_type_hints` не розв'язує анотації повернення публічних методів.
@@ -263,31 +266,48 @@ def _construct_from_input(model_cls: type[_ModelT], data: Mapping[str, Any], con
 
 
 @lru_cache(maxsize=1024)
-def _field_adapter(cls: type[BaseModel], name: str) -> TypeAdapter:
+def _field_annotation(cls: type[BaseModel], name: str) -> Any:
     """
-    `TypeAdapter`, що валідує значення поля `name` так само, як його валідує `model_validate` класу `cls`.
+    Повна анотація поля `name` класу `cls` — та, з якою поле валідує `model_validate`.
 
     - Тип — `Annotated[анотація поля, *field.metadata]`: так діють обмеження `Field` (`gt`, `min_length`, `strict`, …).
       `discriminator` `FieldInfo` зберігає окремо від `metadata`, тому він додається власним `Field(discriminator=...)`.
       Весь `FieldInfo` передавати не можна: pydantic ≥2.12 попереджає, що `alias`, `exclude`, `validate_default` поза полем моделі не діють.
     - Анотація береться з `model_fields`: pydantic уже підставив у неї параметри generic і розв'язав анотації-рядки.
-    - Конфіг — `cls.model_config`, тож діють `strict`, `str_strip_whitespace`, `arbitrary_types_allowed` та інші ключі конфігу.
-      Тип із власним конфігом (`BaseModel`, dataclass, `TypedDict`) pydantic разом з `config` не приймає.
-      Такий тип і так валідується за своїм конфігом, тому для нього адаптер будується без `config`.
 
-    Кеш за парою «клас, поле», бо `FieldInfo` не хешується, а клас з ім'ям поля однозначно задають адаптер.
+    Кеш потрібен не лише для швидкості: він віддає ту саму анотацію тим самим об'єктом.
+    `FieldInfo` не має рівності за значенням, тож нова анотація на кожен виклик не влучала б у кеші, що беруть її ключем.
     """
     field = cls.model_fields[name]
     discriminator = [Field(discriminator=field.discriminator)] if field.discriminator is not None else []
     metadata = [*field.metadata, *discriminator]
-    annotation = Annotated[(field.annotation, *metadata)] if metadata else field.annotation
+    return Annotated[(field.annotation, *metadata)] if metadata else field.annotation
 
+
+def _type_adapter(owner: type[BaseModel], annotation: Any) -> TypeAdapter:
+    """
+    `TypeAdapter` для `annotation` з конфігом моделі `owner`, тож діють `strict`, `str_strip_whitespace`, `arbitrary_types_allowed` та інші ключі конфігу.
+
+    Тип із власним конфігом (`BaseModel`, dataclass, `TypedDict`) pydantic разом з `config` не приймає.
+    Такий тип і так валідується за своїм конфігом, тому для нього адаптер будується без `config`.
+    """
     try:
-        return TypeAdapter(annotation, config=cls.model_config)
+        return TypeAdapter(annotation, config=owner.model_config)
     except PydanticUserError as exc:
         if exc.code != 'type-adapter-config-unused':
             raise
         return TypeAdapter(annotation)
+
+
+@lru_cache(maxsize=1024)
+def _field_adapter(cls: type[BaseModel], name: str) -> TypeAdapter:
+    """
+    `TypeAdapter`, що валідує значення поля `name` так само, як його валідує `model_validate` класу `cls`:
+    повна анотація поля (`_field_annotation`) з конфігом класу (`_type_adapter`).
+
+    Кеш за парою «клас, поле», бо створення адаптера дороге, а клас з ім'ям поля однозначно задають адаптер.
+    """
+    return _type_adapter(cls, _field_annotation(cls, name))
 
 
 def _validate_constructed_defaults(instance: BaseModel, strict: bool | None) -> None:
@@ -479,6 +499,7 @@ class ElasticModel(BaseModel):
         :param validate:
             - If True (default) - all values from `data` will be validated and converted by the field rules, as `model_validate` does: annotation, `Field` constraints and the model config.
             - If False - values are accepted "as is" (only for trusted flows).
+              In a plain `Union` field the values are still checked to pick the branch, but they land in the model as is.
         :param strict_validate:
             - If True - values are validated in pydantic strict mode, without coercion: `"5"` is not turned into `5`.
               Turns validation on even with `validate=False`.
@@ -622,25 +643,28 @@ def _elastic_coerce_value(cls: type[BaseModel], name: str, value: Any, options: 
     - з валідацією (`options.validates`) — валідує й приводить його за правилами поля pydantic (див. `_field_adapter`);
     - без валідації — лише будує вкладені `ElasticModel` і `BaseModel` (див. `_elastic_prepare_value`).
     """
-    prepared_value = _elastic_prepare_value(value, cls.model_fields[name].annotation, options)
+    prepared_value = _elastic_prepare_value(value, _field_annotation(cls, name), options, owner=cls)
 
     if options.validates:
         return _field_adapter(cls, name).validate_python(prepared_value, strict=options.strict)
     return prepared_value
 
 
-def _elastic_prepare_value(value: Any, annotation: Any, options: _CreateOptions) -> Any:
+def _elastic_prepare_value(value: Any, annotation: Any, options: _CreateOptions, owner: type[BaseModel]) -> Any:
     """
     Будує із сирого значення вкладені моделі, яких pydantic не збудує частковими:
-    - `dict` для поля `ElasticModel` стає частковою моделлю через її `elastic_create` з тими самими `options`.
-      Так параметри головного конструктора діють на всіх рівнях вкладеності, зокрема в елементах контейнерів.
+    - `dict` для поля `ElasticModel` стає частковою моделлю (див. `_elastic_build_model`).
     - `dict` для поля `BaseModel` без валідації стає моделлю через `model_construct`, інакше в полі лишився б `dict`.
       З валідацією його будує й перевіряє pydantic.
     - Елементи `list`/`tuple`/`set` і значення `dict` обходяться за анотацією елемента.
+    - `Optional[X]` обходиться як `X`.
+    - `dict` для поля `Union` стає моделлю обраної гілки (див. `_elastic_build_union`).
 
     Решта значень повертається як є, і їх перевіряє pydantic.
     Зокрема значення не того типу, наприклад число для `list[int]`: pydantic поверне на нього свою помилку.
-    `Optional` і `Union` не обходяться, бо гілку обирає pydantic; тому без валідації модель у такому полі лишається `dict` (обмеження описане в README).
+
+    :param annotation: анотація разом з метаданими `Annotated`: з них береться дискримінатор `Union`.
+    :param owner: модель, чиє поле обходиться; з її конфігом будуються адаптери типів усередині поля.
     """
     if value is None:
         return None
@@ -648,40 +672,340 @@ def _elastic_prepare_value(value: Any, annotation: Any, options: _CreateOptions)
     base = _strip_annot(annotation)
     origin = get_origin(base)
 
+    if origin is Union or origin is UnionType:
+        members = [member for member in get_args(base) if member is not type(None)]
+        # `Optional[X]` поводиться як `X` для будь-якого значення: так обходяться й контейнери, й дискримінований `Union` усередині
+        if len(members) == 1:
+            return _elastic_prepare_value(value, members[0], options, owner)
+        if isinstance(value, dict):
+            return _elastic_build_union(value, annotation, options, owner)
+        return value
+
     # !todo на кожному value викликається ця перевірка, можливо потрібно це робити якось оптимізованіше, перевірити що value це клас хочаб
-    if isinstance(value, dict):
-        if _issubclass_safe(base, ElasticModel):
-            return base.elastic_create(value, validate=options.validate, strict_validate=options.strict_validate, defaults=options.defaults)
-
-        if _issubclass_safe(base, BaseModel):
-            if options.validates:
-                return value
-
-            # Ключі зіставляються з полями за тими самими правилами, що й в `elastic_create`.
-            # Сховища `elastic_extra` у `BaseModel` немає, тому незаповнені ключі зберігаються лише в `model_extra` при `extra='allow'`.
-            fields = base.model_fields
-            instance, _ = _construct_from_input(base, value, lambda name, item: _elastic_prepare_value(item, fields[name].annotation, options))
-            return instance
+    if isinstance(value, dict) and _issubclass_safe(base, BaseModel):
+        # `BaseModel` з валідацією будує й перевіряє адаптер поля pydantic
+        if options.validates and not _issubclass_safe(base, ElasticModel):
+            return value
+        return _elastic_build_model(base, value, options)
 
     if origin in (list, set, tuple) and _is_collection_input(value):
         args = get_args(base) or (Any,)
         if origin is list:
-            return [_elastic_prepare_value(item, args[0], options) for item in value]
+            return [_elastic_prepare_value(item, args[0], options, owner) for item in value]
         if origin is set:
-            return {_elastic_prepare_value(item, args[0], options) for item in value}
+            return {_elastic_prepare_value(item, args[0], options, owner) for item in value}
 
         # Кортеж змінної довжини: `tuple[T, ...]`
         if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(_elastic_prepare_value(item, args[0], options) for item in value)
+            return tuple(_elastic_prepare_value(item, args[0], options, owner) for item in value)
 
         # Кортеж фіксованої довжини: обходяться лише описані позиції, а зайві елементи лишаються як є, щоб pydantic повідомив про довжину
         items = list(value)
-        head = [_elastic_prepare_value(item, item_annotation, options) for item, item_annotation in zip(items, args)]
+        head = [_elastic_prepare_value(item, item_annotation, options, owner) for item, item_annotation in zip(items, args)]
         return tuple(head + items[len(args):])
 
     # Ключі словника лишаються як є: моделі можуть бути лише в значеннях
     if origin is dict and isinstance(value, Mapping):
         _, value_annotation = get_args(base) or (Any, Any)
-        return {key: _elastic_prepare_value(item, value_annotation, options) for key, item in value.items()}
+        return {key: _elastic_prepare_value(item, value_annotation, options, owner) for key, item in value.items()}
 
     return value
+
+
+def _elastic_build_model(model_cls: type[BaseModel], value: dict[str, Any], options: _CreateOptions) -> BaseModel:
+    """
+    Будує з `dict` часткову модель `model_cls`:
+    - `ElasticModel` — через її `elastic_create` з тими самими `options`.
+      Так параметри головного конструктора діють на всіх рівнях вкладеності, зокрема в елементах контейнерів.
+    - `BaseModel` — через `model_construct` без валідації, зі значеннями полів, підготованими цим самим обходом.
+      `BaseModel` з валідацією сюди не доходить: його `dict` будує й перевіряє адаптер поля pydantic.
+    """
+    if _issubclass_safe(model_cls, ElasticModel):
+        return model_cls.elastic_create(value, validate=options.validate, strict_validate=options.strict_validate, defaults=options.defaults)
+
+    # Ключі зіставляються з полями за тими самими правилами, що й в `elastic_create`.
+    # Сховища `elastic_extra` у `BaseModel` немає, тому незаповнені ключі зберігаються лише в `model_extra` при `extra='allow'`.
+    instance, _ = _construct_from_input(
+        model_cls, value, lambda name, item: _elastic_prepare_value(item, _field_annotation(model_cls, name), options, owner=model_cls)
+    )
+    return instance
+
+
+# =========================
+#   Union fields of elastic_create
+# =========================
+
+def _elastic_build_union(value: dict[str, Any], annotation: Any, options: _CreateOptions, owner: type[BaseModel]) -> Any:
+    """
+    Будує з `dict` модель гілки поля `Union` — тієї, яку обрав би pydantic, але частковою, як пряме поле (див. `_elastic_build_model`).
+
+    - Дискримінований `Union` (дискримінатор у метаданих `Annotated`): клас гілки береться з таблиці тегів pydantic за тегом із даних.
+      Так обирає гілку сам pydantic, і код інших гілок (`model_post_init`, валідатори) не виконується.
+      Немає тегу, тег невідомий або таблиці немає — значення повертається як є:
+      з валідацією адаптер поля поверне на нього помилку pydantic (`union_tag_not_found`), без валідації в полі лишається `dict`.
+    - Звичайний `Union` — гілка за правилом smart mode pydantic (див. `_plain_union_branch`).
+
+    Обрана гілка-`BaseModel` з валідацією, як і пряме поле, не будується: значення лишається як є, і його будує й перевіряє адаптер поля pydantic.
+    Часткових даних вона однаково не прийме, а так результат і помилки збігаються з pydantic, разом зі шляхом помилки й переходом до інших гілок.
+
+    :param annotation: анотація `Union` разом з метаданими `Annotated`.
+    """
+    if any(_is_discriminator(item) for item in _annotation_metadata(annotation)):
+        table = _call_with_cache(_union_tag_table, owner, annotation)
+        branch = table.branch_of(value) if table is not None else None
+    else:
+        branch = _plain_union_branch(value, annotation, options, owner)
+
+    if branch is None or (options.validates and not _issubclass_safe(branch, ElasticModel)):
+        return value
+    return _elastic_build_model(branch, value, options)
+
+
+def _plain_union_branch(value: dict[str, Any], annotation: Any, options: _CreateOptions, owner: type[BaseModel]) -> type[BaseModel] | None:
+    """
+    Гілка-модель звичайного `Union` для значення-`dict` — за правилом, близьким до smart mode pydantic, однаково за будь-якого `validate`.
+
+    1. Гілка-не-модель, що приймає `dict` (`dict`, `Any`, `TypedDict`), — гілку обирає pydantic: повертається `None`, і значення лишається як є.
+    2. Гілки-моделі впорядковуються (див. `_ordered_model_branches`): гілка з `extra='forbid'` і чужими ключами вибуває, далі повні, далі більше заповнених полів, далі ліва.
+    3. Обирається перша гілка, що приймає наявні значення (див. `_elastic_branch_accepts`); якщо гілка одна, перевірка пропускається.
+       Гілка, якій дані не заповнюють жодного поля, значень не приймає.
+       Якщо не приймає жодна, обирається перша: з валідацією її побудова дасть ту саму помилку, що пряме поле, без валідації вона будується зі значеннями як є.
+    Якщо вибули всі гілки-моделі, повертається `None`: з валідацією pydantic поверне свою помилку, без валідації лишається `dict`.
+
+    Розходження з pydantic, описані в README: точність збігу (`IntX` проти `StrX` для `"1"`) і валідатори класу гілки у виборі не беруть участі.
+
+    Приклад: `Union[Card, Bank]`, дані `{"kind": "bank"}`. Обидві гілки неповні й заповнюють одне поле, тож порядок `Card`, `Bank`.
+    `Card` відкидає `"bank"` для `Literal["card"]`, `Bank` приймає — обирається `Bank`.
+    """
+    models, others = _union_branches(_strip_annot(annotation))
+    if any(_non_model_branch_accepts(owner, other, value, options) for other in others):
+        return None
+
+    candidates = _ordered_model_branches(models, value)
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else None
+
+    return next((branch for branch in candidates if _elastic_branch_accepts(branch, value, options)), candidates[0])
+
+
+def _union_branches(union: Any) -> tuple[list[type[BaseModel]], list[Any]]:
+    """
+    Гілки `Union` у порядку оголошення, розділені на гілки-моделі (підкласи `BaseModel`) і решту; `None` пропускається.
+    Гілки-не-моделі зберігають свої метадані `Annotated`, бо з ними pydantic їх і валідує.
+    Вкладений `Union` (зокрема дискримінований як член ширшого) розгортається у свої гілки.
+    """
+    models: list[type[BaseModel]] = []
+    others: list[Any] = []
+    for member in get_args(union):
+        base = _strip_annot(member)
+        if base is type(None):
+            continue
+        if get_origin(base) is Union or get_origin(base) is UnionType:
+            nested_models, nested_others = _union_branches(base)
+            models += nested_models
+            others += nested_others
+        elif _issubclass_safe(base, BaseModel):
+            models.append(base)
+        else:
+            others.append(member)
+    return models, others
+
+
+def _non_model_branch_accepts(owner: type[BaseModel], annotation: Any, value: dict[str, Any], options: _CreateOptions) -> bool:
+    """Чи приймає гілка-не-модель значення: її валідує адаптер з конфігом власника поля, тож діє, зокрема, `arbitrary_types_allowed`."""
+    try:
+        _call_with_cache(_owner_type_adapter, owner, annotation).validate_python(value, strict=options.strict)
+    except ValidationError:
+        return False
+    return True
+
+
+@lru_cache(maxsize=256)
+def _owner_type_adapter(owner: type[BaseModel], annotation: Any) -> TypeAdapter:
+    """
+    Кешований `_type_adapter`: адаптер типу всередині поля моделі `owner`.
+    Кеш за парою «`owner`, анотація», бо `ConfigDict` не хешується, а клас однозначно задає конфіг.
+    """
+    return _type_adapter(owner, annotation)
+
+
+def _ordered_model_branches(models: list[type[BaseModel]], value: Mapping[str, Any]) -> list[type[BaseModel]]:
+    """
+    Гілки-моделі в порядку вибору для значення-`dict`; екземпляри при цьому не створюються.
+
+    - Заповнені поля гілки — ті, які заповнили б ключі значення за правилами аліасів (`_input_key_map`), тобто майбутній `model_fields_set`.
+    - Гілка з `extra='forbid'` вибуває, якщо в значенні є ключ, що не заповнює її поле: pydantic таку гілку відкидає.
+    - Порядок: спершу повні (заповнені всі обов'язкові поля), далі за кількістю заповнених полів за спаданням, далі за порядком оголошення.
+    """
+    ranked: list[tuple[bool, int, type[BaseModel]]] = []
+    for model in models:
+        filling_keys = _input_key_map(model).filling_keys(value)
+        if model.model_config.get('extra') == 'forbid' and len(filling_keys) < len(value):
+            continue
+
+        filled = set(filling_keys.values())
+        complete = all(name in filled for name, field in model.model_fields.items() if field.is_required())
+        ranked.append((complete, len(filled), model))
+
+    # Сортування стабільне, тож за рівних умов лишається порядок оголошення
+    ranked.sort(key=lambda item: (not item[0], -item[1]))
+    return [model for _, _, model in ranked]
+
+
+def _elastic_branch_accepts(branch: type[BaseModel], value: Mapping[str, Any], options: _CreateOptions) -> bool:
+    """
+    Чи приймає гілка наявні значення: кожне значення, що заповнює її поле, валідується за правилами поля, як в `elastic_create` з валідацією.
+
+    Перевірка однакова за будь-якого `validate` і з тим самим `strict_validate`, а дефолти в ній не беруть участі.
+    Екземпляр гілки не створюється, тож її `model_post_init` і валідатори класу не виконуються.
+    Валідатори з `Annotated` полів гілки й `wrap`/`after`-валідатори її вкладених моделей при цьому виконуються (межа описана в README).
+    Повний `model_validate` тут не годиться: частковий `BaseModel` він відкидає завжди.
+    """
+    filling_keys = _input_key_map(branch).filling_keys(value)
+    # Гілка, якій дані не заповнюють жодного поля, нічим їх не підтверджує.
+    # Інакше вона «приймала» б будь-які дані, і хибне значення для іншої гілки мовчки потрапляло б у її `elastic_extra`.
+    if not filling_keys:
+        return False
+
+    check = _CreateOptions(validate=True, strict_validate=options.strict_validate, defaults=False)
+    try:
+        for key, name in filling_keys.items():
+            _elastic_coerce_value(branch, name, value[key], check)
+    except ValidationError:
+        return False
+    return True
+
+
+def _annotation_metadata(annotation: Any) -> tuple[Any, ...]:
+    """Метадані `Annotated[тип, *метадані]`; для анотації без `Annotated` — порожньо."""
+    return get_args(annotation)[1:] if get_origin(annotation) is Annotated else ()
+
+
+def _is_discriminator(item: Any) -> bool:
+    """Чи задає елемент метаданих дискримінатор `Union`: `Discriminator(...)` або `Field(discriminator=...)`."""
+    return isinstance(item, Discriminator) or (isinstance(item, FieldInfo) and item.discriminator is not None)
+
+
+def _call_with_cache(cached: Callable[..., Any], *args: Any) -> Any:
+    """
+    Викликає функцію з `lru_cache`, а для нехешованих аргументів — її саму без кешу.
+    `lru_cache` на нехешованому аргументі піднімає `TypeError`; анотація буває нехешованою, якщо в її метаданих нехешований об'єкт.
+    """
+    try:
+        hash(args)
+    except TypeError:
+        return cached.__wrapped__(*args)
+    return cached(*args)
+
+
+@dataclass(frozen=True)
+class _UnionTagTable:
+    """
+    Таблиця вибору гілки дискримінованого `Union` — та, яку pydantic склав у схемі поля і за якою сам обирає гілку.
+
+    - `discriminator` — callable, що повертає тег зі значення (як `Discriminator(функція)`), або шляхи ключів, за якими тег лежить у `dict`.
+      Шляхів кілька, коли поле-тег приймається і за іменем, і за аліасом: `(('kind',), ('_kind',))`.
+    - `choices` — тег → клас гілки. Тег — значення `Literal` поля-тегу (рядок, число, член `Enum`) або мітка `Tag`.
+    """
+    discriminator: Callable[[Any], Any] | tuple[tuple[str | int, ...], ...]
+    choices: Mapping[Any, type[BaseModel]]
+
+    def branch_of(self, value: Mapping[str, Any]) -> type[BaseModel] | None:
+        """
+        Клас гілки для значення-`dict`; `None`, якщо тегу в значенні немає або такого тегу немає в таблиці.
+
+        Тег зіставляється лише рівністю, як у pydantic.
+        Тому рядок `"card"` знаходить гілку `Literal[Kind.CARD]` лише для `str`-Enum, член якого дорівнює своєму рядку; для звичайного `Enum` pydantic дає `union_tag_invalid`.
+        Перебір замість `choices.get(tag)`, бо тег з даних буває нехешованим.
+        """
+        tag = self.discriminator(value) if callable(self.discriminator) else _tag_by_paths(value, self.discriminator)
+        if tag is None:
+            return None
+
+        for choice_tag, branch in self.choices.items():
+            if choice_tag == tag:
+                return branch
+        return None
+
+
+def _tag_by_paths(value: Mapping[str, Any], paths: tuple[tuple[str | int, ...], ...]) -> Any:
+    """
+    Тег за першим шляхом ключів, що повністю знаходиться в значенні; `None`, якщо не знайшовся жоден.
+    Крок шляху — ключ словника або, як в `AliasPath`, індекс у списку.
+
+    Приклад: `_tag_by_paths({"_kind": "card"}, (("kind",), ("_kind",)))` → `"card"`.
+    """
+    for path in paths:
+        item: Any = value
+        for step in path:
+            if isinstance(item, Mapping) and step in item:
+                item = item[step]
+            elif isinstance(step, int) and isinstance(item, (list, tuple)) and -len(item) <= step < len(item):
+                item = item[step]
+            else:
+                break
+        else:
+            return item
+    return None
+
+
+@lru_cache(maxsize=256)
+def _union_tag_table(owner: type[BaseModel], annotation: Any) -> _UnionTagTable | None:
+    """
+    Таблиця тегів дискримінованого `Union` з анотацією `annotation` у полі моделі `owner`.
+
+    Береться з `core_schema` адаптера `Annotated[Union, лише дискримінатори]` з конфігом `owner`: решта метаданих поля
+    (обмеження, валідатори) загорнула б вузол `tagged-union` у свої вузли.
+    - Перед вузлом можуть стояти `definitions` (рекурсивні моделі, callable-дискримінатор) і `nullable` (`None` серед членів).
+    - Гілка — схема `model`, обгортка валідаторів класу навколо неї (`function-after` тощо) або `definition-ref` на `definitions`.
+    - Гілка-не-модель (`TypedDict`, dataclass) у таблицю не потрапляє: її будує pydantic.
+
+    `core_schema` — внутрішній формат pydantic, форма перевірена на 2.11.0, 2.11.7 і 2.14.1.
+    Якщо вузла `tagged-union` немає, повертається `None`, і значення лишається як є, а не падає.
+
+    Кеш за парою «`owner`, анотація», бо `ConfigDict` не хешується, а клас однозначно задає конфіг.
+    """
+    discriminators = [item for item in _annotation_metadata(annotation) if _is_discriminator(item)]
+    node = _type_adapter(owner, Annotated[(_strip_annot(annotation), *discriminators)]).core_schema
+
+    definitions: dict[str, Any] = {}
+    while node['type'] in ('definitions', 'nullable'):
+        if node['type'] == 'definitions':
+            definitions.update((definition['ref'], definition) for definition in node['definitions'])
+        node = node['schema']
+
+    if node['type'] != 'tagged-union':
+        return None
+
+    choices = {tag: _schema_model_cls(choice, definitions) for tag, choice in node['choices'].items()}
+    return _UnionTagTable(
+        discriminator=_discriminator_paths(node['discriminator']),
+        choices=MappingProxyType({tag: branch for tag, branch in choices.items() if branch is not None}),
+    )
+
+
+def _schema_model_cls(schema: Any, definitions: Mapping[str, Any]) -> type[BaseModel] | None:
+    """
+    Клас моделі за схемою гілки: `definition-ref` розгортається через `definitions`, обгортки валідаторів — через їхню `schema`.
+    `None`, якщо під обгортками не модель.
+    """
+    node = schema
+    while isinstance(node, Mapping):
+        if node.get('type') == 'model':
+            return node['cls'] if _issubclass_safe(node['cls'], BaseModel) else None
+        node = definitions.get(node['schema_ref']) if node.get('type') == 'definition-ref' else node.get('schema')
+    return None
+
+
+def _discriminator_paths(discriminator: Any) -> Callable[[Any], Any] | tuple[tuple[str | int, ...], ...]:
+    """
+    Дискримінатор вузла `tagged-union` у формі `_UnionTagTable.discriminator`.
+    pydantic записує його callable, рядком (`'kind'`), одним шляхом (`['kind']`) або переліком шляхів (`[['kind'], ['_kind']]`).
+    """
+    if callable(discriminator):
+        return discriminator
+    if isinstance(discriminator, str):
+        return ((discriminator,),)
+    if discriminator and isinstance(discriminator[0], list):
+        return tuple(tuple(path) for path in discriminator)
+    return (tuple(discriminator),)

@@ -15,9 +15,11 @@ import pytest
 
 import sys
 from enum import Enum
-from typing import Annotated, Any, Dict, Generic, List, Literal, Tuple, TypeVar, Union
+from typing import Annotated, Any, Dict, Generic, List, Literal, Optional, Tuple, TypeVar, Union
 
-from pydantic import AliasChoices, AliasPath, EmailStr, Field, PrivateAttr, ValidationError, BaseModel, ConfigDict, create_model, field_validator, model_validator
+from pydantic import AliasChoices, AliasPath, Discriminator, EmailStr, Field, PrivateAttr, Tag, ValidationError, BaseModel, ConfigDict, create_model, field_validator, model_validator
+# pydantic на Python < 3.12 приймає лише `TypedDict` з `typing_extensions`
+from typing_extensions import TypedDict
 
 from elasticmodel import ElasticModel
 
@@ -321,17 +323,17 @@ def test_discriminated_union_validate_true():
     assert p.method.pan == "1234"
 
 
-def test_discriminated_union_validate_false_keeps_raw():
+def test_discriminated_union_validate_false_builds_branch():
     """
-    Union із дискримінатором: validate=False → лишається «як є» (dict).
+    Union із дискримінатором: validate=False → будується модель гілки за тегом, значення «як є».
     """
     p = Payment.elastic_create({
         "method": {"kind": "bank", "iban": "UA..."}
     }, validate=False)
 
-    assert isinstance(p.method, dict)
-    assert p.method["kind"] == "bank"
-    assert p.method["iban"] == "UA..."
+    assert isinstance(p.method, Bank)
+    assert p.method.elastic_loaded_fields == {"kind", "iban"}
+    assert p.method.iban == "UA..."
 
 
 def test_annotated_constraints_preserved():
@@ -1681,6 +1683,717 @@ def test_data_key_named_like_model_construct_parameter_matches_pydantic(key, ext
     assert m.model_extra == reference.model_extra
     assert m.elastic_loaded_fields == reference.model_fields_set
     assert m.elastic_extra == {key: {"zzz"}}
+
+
+# --------------------------
+# Поля Optional/Union в elastic_create (FR-16)
+# --------------------------
+
+def _describe(value: Any) -> Any:
+    """
+    Значення поля в порівнюваному вигляді: модель — її клас, завантажені поля (рекурсивно), `model_fields_set` і ключі поза полями; контейнери — поелементно.
+    Часткову модель через `model_dump()` не порівняти, бо незавантажених полів у ній немає.
+    """
+    if isinstance(value, BaseModel):
+        unfilled = value.elastic_extra if isinstance(value, ElasticModel) else value.model_extra
+        return type(value), {name: _describe(item) for name, item in vars(value).items()}, value.model_fields_set, unfilled
+    if isinstance(value, list):
+        return [_describe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _describe(item) for key, item in value.items()}
+    return value
+
+
+def _field_outcome(holder_cls: type[ElasticModel], field: str, value: Any, **options: Any) -> tuple[str, Any]:
+    """
+    Результат `elastic_create` для одного поля: `_describe` значення при успіху або `(type, loc)` помилок при `ValidationError`.
+    """
+    try:
+        return "ok", _describe(getattr(holder_cls.elastic_create({field: value}, **options), field))
+    except ValidationError as exc:
+        return "error", [(error["type"], error["loc"]) for error in exc.errors()]
+
+
+def _pydantic_outcome(create) -> tuple[str, Any]:
+    """
+    Результат звичайного шляху pydantic: `model_dump()` при успіху або `(type, loc)` помилок при `ValidationError`.
+    """
+    try:
+        return "ok", create().model_dump()
+    except ValidationError as exc:
+        return "error", [(error["type"], error["loc"]) for error in exc.errors()]
+
+
+def _payment_models(base: type[BaseModel]) -> type[ElasticModel]:
+    """
+    Власник із полем дискримінованого `Union[Card, Bank]` і прямим полем `Card`; гілки — на `base`.
+    Пряме поле — еталон: гілка `Union` з тими самими даними й параметрами має дорівнювати йому.
+    """
+    class Card(base):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+        limit: int = 100
+
+    class Bank(base):
+        kind: Literal["bank"]
+        iban: str
+
+    class Holder(ElasticModel):
+        method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+        card: Card
+
+    return Holder
+
+
+def _union_holder(base: type[BaseModel], fields: tuple[str, ...] = ("tagged", "plain")) -> type[BaseModel]:
+    """Клас на `base` з обов'язковими полями `fields`: `tagged` — дискримінований `Union[Card, Bank]`, `plain` — звичайний з тими самими гілками."""
+    class Card(base):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    class Bank(base):
+        kind: Literal["bank"]
+        iban: str
+
+    annotations = {"tagged": Annotated[Union[Card, Bank], Field(discriminator="kind")], "plain": Union[Card, Bank]}
+    return create_model("Holder", __base__=base, **{name: (annotations[name], ...) for name in fields})
+
+
+UNION_VALUES = [
+    pytest.param({"kind": "card", "pan": "1", "holder": "X"}, id="full-card"),
+    pytest.param({"kind": "bank", "iban": "UA"}, id="full-bank"),
+    pytest.param({"kind": "card", "holder": "X"}, id="partial-card"),
+    pytest.param({"pan": "1", "holder": "X"}, id="no-tag"),
+    pytest.param({"kind": "zzz", "iban": "UA"}, id="unknown-tag"),
+]
+
+
+@pytest.mark.parametrize("value", UNION_VALUES)
+def test_union_fields_regular_path_matches_pydantic(value):
+    """
+    U.10: обхід `Union` живе лише в `elastic_create`, тож `model_validate` і конструктор дають те саме, що клас на `BaseModel`.
+    Порівнюються результат і помилки разом із `loc`, де є мітки гілок.
+    """
+    reference_cls = _union_holder(BaseModel)
+    elastic_cls = _union_holder(ElasticModel)
+    data = {"tagged": value, "plain": value}
+
+    assert _pydantic_outcome(lambda: elastic_cls.model_validate(data)) == _pydantic_outcome(lambda: reference_cls.model_validate(data))
+    assert _pydantic_outcome(lambda: elastic_cls(**data)) == _pydantic_outcome(lambda: reference_cls(**data))
+
+
+@pytest.mark.parametrize("validate", [True, False])
+@pytest.mark.parametrize("base", [ElasticModel, BaseModel])
+def test_discriminated_union_partial_branch_matches_direct_field(base, validate):
+    """
+    U.1, issue #1 і #2: частковий `dict` у полі дискримінованого `Union` дає те саме, що пряме поле класу гілки, — часткову модель.
+    `BaseModel` з валідацією pydantic частковим не приймає: і гілку, і пряме поле перевіряє адаптер поля, тож помилка — та сама, що в `model_validate`.
+    """
+    holder = _payment_models(base)
+    value = {"kind": "card", "holder": "X"}
+
+    if base is BaseModel and validate:
+        with pytest.raises(ValidationError) as caught:
+            holder.model_validate({"method": value, "card": value})
+        expected = [(error["type"], error["loc"][1:]) for error in caught.value.errors() if error["loc"][0] == "method"]
+
+        assert _field_outcome(holder, "method", value) == ("error", expected)
+        return
+
+    assert _field_outcome(holder, "method", value, validate=validate) == _field_outcome(holder, "card", value, validate=validate)
+
+
+def _optional_holder() -> type[ElasticModel]:
+    """
+    Власник з полями `Optional[X]` і прямими полями `X` для тих самих `X`.
+    Дискримінований `Union` усередині `Optional` записаний у трьох формах, остання — через `|`.
+    """
+    class Card(ElasticModel):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    class Bank(ElasticModel):
+        kind: Literal["bank"]
+        iban: str
+
+    Tagged = Annotated[Union[Card, Bank], Field(discriminator="kind")]
+
+    class Holder(ElasticModel):
+        card: Card
+        cards: list[Card]
+        card_map: dict[str, Card]
+        method: Tagged
+        opt_card: Optional[Card]
+        opt_cards: Optional[list[Card]]
+        opt_card_map: Optional[dict[str, Card]]
+        opt_outer: Optional[Tagged]
+        opt_inner: Annotated[Optional[Union[Card, Bank]], Field(discriminator="kind")]
+        opt_pipe: Card | Bank | None = Field(discriminator="kind")
+
+    return Holder
+
+
+_PARTIAL_CARD = {"kind": "card", "holder": "X"}
+
+
+@pytest.mark.parametrize("validate", [True, False])
+@pytest.mark.parametrize("optional_field, direct_field, value", [
+    pytest.param("opt_card", "card", _PARTIAL_CARD, id="Optional[Card]"),
+    pytest.param("opt_cards", "cards", [_PARTIAL_CARD], id="Optional[list[Card]]"),
+    pytest.param("opt_card_map", "card_map", {"a": _PARTIAL_CARD}, id="Optional[dict[str, Card]]"),
+    pytest.param("opt_outer", "method", _PARTIAL_CARD, id="Optional[Annotated[U, disc]]"),
+    pytest.param("opt_inner", "method", _PARTIAL_CARD, id="Annotated[Optional[U], disc]"),
+    pytest.param("opt_pipe", "method", _PARTIAL_CARD, id="Card|Bank|None=Field(disc)"),
+])
+def test_optional_field_behaves_as_inner_type(optional_field, direct_field, value, validate):
+    """
+    U.8: `Optional[X]` поводиться як `X` — часткові дані дають те саме, що пряме поле `X`.
+    """
+    holder = _optional_holder()
+
+    expected = _field_outcome(holder, direct_field, value, validate=validate)
+
+    assert expected[0] == "ok"
+    assert _field_outcome(holder, optional_field, value, validate=validate) == expected
+
+
+@pytest.mark.parametrize("validate", [True, False])
+@pytest.mark.parametrize("field", ["opt_card", "opt_cards", "opt_card_map", "opt_outer", "opt_inner", "opt_pipe"])
+def test_optional_field_keeps_none(field, validate):
+    """U.8: `None` у полі `Optional` лишається `None`."""
+    assert getattr(_optional_holder().elastic_create({field: None}, validate=validate), field) is None
+
+
+# `str`-Enum: pydantic зіставляє рядок-тег з членом, бо член дорівнює своєму рядку.
+# Для звичайного `Enum` рядок `"card"` pydantic відкидає з `union_tag_invalid`.
+class _Kind(str, Enum):
+    CARD = "card"
+    BANK = "bank"
+
+
+def _kind_tag(value: Any) -> str | None:
+    """Callable-дискримінатор: тег `Tag` за полем `kind` словника чи екземпляра."""
+    kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
+    return {"card": "c", "bank": "b"}.get(kind)
+
+
+def _string_tag_form(base):
+    class Card(base):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    class Bank(base):
+        kind: Literal["bank"]
+        iban: str
+
+    class Holder(base):
+        method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+
+    return Holder, {"kind": "card", "holder": "X"}, "Card", {"kind", "holder"}
+
+
+def _callable_tag_form(base):
+    class Card(base):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    class Bank(base):
+        kind: Literal["bank"]
+        iban: str
+
+    class Holder(base):
+        method: Annotated[Union[Annotated[Card, Tag("c")], Annotated[Bank, Tag("b")]], Discriminator(_kind_tag)]
+
+    return Holder, {"kind": "card", "holder": "X"}, "Card", {"kind", "holder"}
+
+
+def _alias_tag_form(base):
+    class Card(base):
+        kind: Literal["card"] = Field(alias="_kind")
+        pan: str
+        holder: str
+
+    class Bank(base):
+        kind: Literal["bank"] = Field(alias="_kind")
+        iban: str
+
+    class Holder(base):
+        method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+
+    return Holder, {"_kind": "card", "holder": "X"}, "Card", {"kind", "holder"}
+
+
+def _enum_tag_form(base):
+    class Card(base):
+        kind: Literal[_Kind.CARD]
+        pan: str
+        holder: str
+
+    class Bank(base):
+        kind: Literal[_Kind.BANK]
+        iban: str
+
+    class Holder(base):
+        method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+
+    return Holder, {"kind": "card", "holder": "X"}, "Card", {"kind", "holder"}
+
+
+def _recursive_tag_form(base):
+    # Рекурсивна гілка потрапляє в таблицю тегів як `definition-ref` на `definitions` схеми
+    class File(base):
+        kind: Literal["file"]
+        name: str
+
+    class Folder(base):
+        kind: Literal["folder"]
+        name: str
+        children: List[Annotated[Union["Folder", File], Field(discriminator="kind")]]
+
+    class Holder(base):
+        method: Annotated[Union[Folder, File], Field(discriminator="kind")]
+
+    return Holder, {"kind": "folder", "children": [{"kind": "file"}]}, "Folder", {"kind", "children"}
+
+
+TAG_FORMS = [
+    pytest.param(_string_tag_form, id="string"),
+    pytest.param(_callable_tag_form, id="callable"),
+    pytest.param(_alias_tag_form, id="alias"),
+    pytest.param(_enum_tag_form, id="enum"),
+    pytest.param(_recursive_tag_form, id="recursive"),
+]
+
+
+@pytest.mark.parametrize("validate", [True, False])
+@pytest.mark.parametrize("form", TAG_FORMS)
+def test_discriminated_union_builds_branch_of_tag(form, validate):
+    """
+    U.2: гілку обирає тег із даних за таблицею pydantic — для кожної форми дискримінатора.
+    """
+    holder, value, branch_name, loaded = form(ElasticModel)
+
+    result = holder.elastic_create({"method": value}, validate=validate).method
+
+    assert type(result).__name__ == branch_name
+    assert result.elastic_loaded_fields == loaded
+
+
+@pytest.mark.parametrize("tag", [None, "zzz"], ids=["no-tag", "unknown-tag"])
+@pytest.mark.parametrize("form", TAG_FORMS)
+def test_discriminated_union_without_known_tag(form, tag):
+    """
+    U.2: без тегу чи з невідомим тегом гілки немає.
+    З валідацією помилка того самого типу, що `model_validate` того самого класу на `BaseModel`; без валідації значення лишається `dict`.
+    """
+    reference_cls, value, _, _ = form(BaseModel)
+    elastic_cls, _, _, _ = form(ElasticModel)
+    tag_key = next(iter(value))
+    value = {key: item for key, item in value.items() if key != tag_key}
+    if tag is not None:
+        value[tag_key] = tag
+    data = {"method": value}
+
+    expected = _validation_outcome(lambda: reference_cls.model_validate(data))
+
+    assert expected[0] == "error"
+    assert _validation_outcome(lambda: elastic_cls.elastic_create(data)) == expected
+    assert elastic_cls.elastic_create(data, validate=False).method == value
+
+
+def _raised(create) -> tuple[type, str] | None:
+    """Виняток виклику як `(тип, текст)`; `None`, якщо виклик пройшов."""
+    try:
+        create()
+    except Exception as exc:
+        return type(exc), str(exc)
+    return None
+
+
+def test_discriminated_union_does_not_run_other_branch_code():
+    """
+    U.3: код необраної гілки не виконується — `Bank.model_post_init` не викликається.
+    Обрана гілка з after-валідатором поводиться як пряме поле: без валідації — часткова модель,
+    з валідацією pydantic запускає валідатор на готовому екземплярі, і той падає на незавантаженому `pan`.
+    """
+    calls: list[str] = []
+
+    class Card(ElasticModel):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+        @model_validator(mode="after")
+        def pan_is_digits(self):
+            if not self.pan.isdigit():
+                raise ValueError("pan must be digits")
+            return self
+
+    class Bank(ElasticModel):
+        kind: Literal["bank"]
+        iban: str
+
+        def model_post_init(self, context: Any) -> None:
+            calls.append("Bank.model_post_init")
+
+    class Holder(ElasticModel):
+        method: Annotated[Union[Card, Bank], Field(discriminator="kind")]
+        card: Card
+
+    value = {"kind": "card", "holder": "X"}
+
+    assert _field_outcome(Holder, "method", value, validate=False) == _field_outcome(Holder, "card", value, validate=False)
+
+    expected = _raised(lambda: Holder.elastic_create({"card": value}))
+    assert expected is not None
+    assert _raised(lambda: Holder.elastic_create({"method": value})) == expected
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("options, value, status", [
+    pytest.param({"defaults": True}, {"kind": "card", "holder": "X"}, "ok", id="defaults"),
+    pytest.param({"strict_validate": True}, {"kind": "card", "limit": "5"}, "error", id="strict"),
+    pytest.param({"strict_validate": True, "validate": False}, {"kind": "card", "limit": "5"}, "error", id="strict-without-validate"),
+])
+def test_create_options_reach_union_branch(options, value, status):
+    """
+    U.9: `defaults` і `strict_validate` доходять до гілки `Union` так само, як до прямого поля.
+    """
+    holder = _payment_models(ElasticModel)
+
+    expected = _field_outcome(holder, "card", value, **options)
+
+    assert expected[0] == status
+    assert _field_outcome(holder, "method", value, **options) == expected
+
+
+@pytest.mark.parametrize("validate", [True, False])
+def test_list_of_discriminated_union_builds_each_element_by_tag(validate):
+    """
+    U.9: у `list[дискримінований Union]` кожен елемент будується гілкою свого тегу.
+    """
+    class Card(ElasticModel):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    class Bank(ElasticModel):
+        kind: Literal["bank"]
+        iban: str
+
+    class Holder(ElasticModel):
+        methods: list[Annotated[Union[Card, Bank], Field(discriminator="kind")]]
+
+    m = Holder.elastic_create({"methods": [{"kind": "card", "holder": "X"}, {"kind": "bank"}]}, validate=validate)
+
+    assert [type(item) for item in m.methods] == [Card, Bank]
+    assert [item.elastic_loaded_fields for item in m.methods] == [{"kind", "holder"}, {"kind"}]
+
+
+# Гілки звичайного `Union` для тестів правила вибору (U.4-U.7).
+class _UCard(ElasticModel):
+    kind: Literal["card"]
+    pan: str
+    holder: str
+
+
+class _UBank(ElasticModel):
+    kind: Literal["bank"]
+    iban: str
+
+
+class _UCardBM(BaseModel):
+    kind: Literal["card"]
+    pan: str
+    holder: str
+
+
+class _UBankBM(BaseModel):
+    kind: Literal["bank"]
+    iban: str
+
+
+class _UA(ElasticModel):
+    x: int
+    a: str
+
+
+class _UB(ElasticModel):
+    x: int
+    b: str
+
+
+class _ULong(ElasticModel):
+    name: str
+    a: int
+    b: int
+    c: int
+
+
+class _UShort(ElasticModel):
+    name: str
+
+
+def _holder_of(annotation: Any, base: type[BaseModel] = ElasticModel, **config: Any) -> type[BaseModel]:
+    """
+    Клас на `base` з одним обов'язковим полем `value` анотації `annotation` і конфігом `config`.
+    Конфіг задає проміжний клас, бо pydantic 2.11.0 не приймає в `create_model` `__base__` разом з `__config__`.
+    """
+    class Configured(base):
+        model_config = ConfigDict(**config)
+
+    return create_model("Holder", __base__=Configured, value=(annotation, ...))
+
+
+@pytest.mark.parametrize("annotation, value, validates, expected", [
+    pytest.param(Union[_UCard, _UBank], {"kind": "bank"}, [True, False], _UBank, id="tag-value-picks-bank"),
+    pytest.param(_UCard | _UBank, {"kind": "bank"}, [True, False], _UBank, id="pipe-form"),
+    pytest.param(Union[_UCardBM, _UBankBM], {"kind": "bank", "holder": "X"}, [False], _UBankBM, id="basemodel-without-validation"),
+    pytest.param(Union[_UA, _UB], {"x": 1}, [True, False], _UA, id="equal-fields-left"),
+    pytest.param(Union[_UA, _UB], {"x": 1, "b": "q"}, [True, False], _UB, id="more-fields-wins"),
+    pytest.param(Union[_ULong, _UShort], {"name": "n", "a": 1, "b": 2}, [True, False], _UShort, id="complete-beats-more-fields"),
+])
+def test_plain_union_picks_branch_for_partial_data(annotation, value, validates, expected):
+    """
+    U.4: на часткових даних звичайний `Union` обирає гілку за правилом FR-16 за будь-якого `validate`:
+    гілка з відкинутими значеннями вибуває; далі повні, далі більше заповнених полів, далі ліва.
+    pydantic таких даних не приймає, тож очікуваний клас вписаний явно.
+    """
+    holder = _holder_of(annotation)
+
+    for validate in validates:
+        assert type(holder.elastic_create({"value": value}, validate=validate).value) is expected
+
+
+def test_plain_union_without_validation_builds_first_branch_when_every_branch_rejects():
+    """
+    U.4: без валідації, коли значення відкидає кожна гілка, будується перша за порядком гілка зі значеннями як є.
+    `_UCard` заповнює два поля, `_UBank` — одне, тож перша — `_UCard`.
+    """
+    result = _holder_of(Union[_UCard, _UBank]).elastic_create({"value": {"kind": "x", "pan": 1}}, validate=False).value
+
+    assert type(result) is _UCard
+    assert (result.kind, result.pan) == ("x", 1)
+
+
+class _TypedCard(TypedDict):
+    kind: str
+
+
+class _Opaque:
+    """Довільний тип без схеми pydantic: адаптер для нього будується лише з `arbitrary_types_allowed`."""
+
+
+def _union_parity_models(base: type[BaseModel]):
+    class Long(base):
+        name: str
+        note: str
+        more: str
+
+    class Short(base):
+        name: str
+        note: str
+
+    class ForbidA(base):
+        model_config = ConfigDict(extra="forbid")
+        x: int
+        y: int
+
+    class PlainX(base):
+        x: int
+
+    class Card(base):
+        kind: Literal["card"]
+        pan: str
+        holder: str
+
+    return {
+        "long-short": (Union[Long, Short], {"name": "n", "note": "t"}),
+        "forbid": (Union[ForbidA, PlainX], {"x": 1, "y": 2, "z": 3}),
+        "dict-card": (Union[dict, Card], {"kind": "card", "pan": "1", "holder": "X"}),
+        "card-dict": (Union[Card, dict], {"kind": "card", "pan": "1", "holder": "X"}),
+        "str-card": (Union[str, Card], {"kind": "card", "pan": "1", "holder": "X"}),
+        "typeddict-card": (Union[_TypedCard, Card], {"kind": "card", "holder": "X"}),
+    }
+
+
+@pytest.mark.parametrize("case", ["long-short", "forbid", "dict-card", "card-dict", "str-card", "typeddict-card"])
+def test_plain_union_matches_pydantic_on_accepted_data(case):
+    """
+    U.5: на даних, які pydantic приймає, клас результату з валідацією той самий, що в `model_validate` того самого класу на `BaseModel`.
+    Гілку-не-модель, що приймає `dict` (`dict`, `TypedDict`), вирішує pydantic.
+    """
+    reference_annotation, value = _union_parity_models(BaseModel)[case]
+    annotation, _ = _union_parity_models(ElasticModel)[case]
+
+    expected = type(_holder_of(reference_annotation, BaseModel).model_validate({"value": value}).value).__name__
+
+    assert type(_holder_of(annotation).elastic_create({"value": value}).value).__name__ == expected
+
+
+@pytest.mark.parametrize("annotation, expected", [
+    pytest.param(Union[_UCard, dict], dict, id="card-dict"),
+    pytest.param(Union[str, _UCard], _UCard, id="str-card"),
+    pytest.param(Union[_TypedCard, _UCard], dict, id="typeddict-card"),
+])
+def test_plain_union_with_non_model_branch_without_validation(annotation, expected):
+    """
+    U.5: без валідації гілка-не-модель, що приймає `dict`, лишає значення `dict`; гілка, що не приймає, не заважає будувати модель.
+    """
+    result = _holder_of(annotation).elastic_create({"value": {"kind": "card", "holder": "X"}}, validate=False).value
+
+    assert type(result) is expected
+
+
+@pytest.mark.parametrize("validate", [True, False])
+def test_plain_union_uses_owner_config_for_non_model_branches(validate):
+    """
+    U.5: адаптер гілки-не-моделі будується з конфігом власника поля: без `arbitrary_types_allowed` схему `_Opaque` pydantic не будує.
+    """
+    holder = _holder_of(Union[_Opaque, _UCard], arbitrary_types_allowed=True)
+
+    result = holder.elastic_create({"value": {"kind": "card", "holder": "X"}}, validate=validate).value
+
+    assert type(result) is _UCard
+    assert result.elastic_loaded_fields == {"kind", "holder"}
+
+
+def _int_str_models(base: type[BaseModel]):
+    class IntX(base):
+        x: int
+
+    class StrX(base):
+        x: str
+
+    return Union[IntX, StrX]
+
+
+def _validated_pair_models(base: type[BaseModel]):
+    class VA(base):
+        x: int
+        y: int
+
+        @model_validator(mode="after")
+        def x_not_greater(self):
+            if self.x > self.y:
+                raise ValueError("x > y")
+            return self
+
+    class VB(base):
+        x: int
+        y: int
+
+    return Union[VA, VB]
+
+
+def test_plain_union_documented_extensions():
+    """
+    U.6: розширення FR-16, описані в README.
+    - Точність збігу не враховується: `{"x": "1"}` у `Union[IntX, StrX]` дає `IntX`, а pydantic — `StrX`.
+    - Валідатори класу гілки у виборі не беруть участі: `Union[VA, VB]` обирає `VA`, і його after-валідатор дає помилку, а pydantic — `VB`.
+      Адаптер поля отримує вже екземпляр `VA`, тож гілка `VB` теж його відкидає (`model_type`).
+    Зміна поведінки ламає тест, тож README треба оновити разом з нею.
+    """
+    data = {"value": {"x": "1"}}
+    assert type(_holder_of(_int_str_models(BaseModel), BaseModel).model_validate(data).value).__name__ == "StrX"
+    assert type(_holder_of(_int_str_models(ElasticModel)).elastic_create(data).value).__name__ == "IntX"
+
+    data = {"value": {"x": 5, "y": 1}}
+    assert type(_holder_of(_validated_pair_models(BaseModel), BaseModel).model_validate(data).value).__name__ == "VB"
+    with pytest.raises(ValidationError) as caught:
+        _holder_of(_validated_pair_models(ElasticModel)).elastic_create(data)
+    assert [error["type"] for error in caught.value.errors()] == ["value_error", "model_type"]
+
+
+def test_union_error_when_no_branch_fits_matches_first_branch_direct_field():
+    """
+    U.7: коли значення не приймає жодна гілка, помилка — як у прямого поля першої за порядком гілки, без `missing` відсутніх полів.
+    """
+    class Holder(ElasticModel):
+        card: _UCard
+        plain: Union[_UCard, _UBank]
+        optional: Optional[_UCard]
+
+    value = {"kind": "card", "holder": 5}
+
+    expected = _field_outcome(Holder, "card", value)
+
+    assert expected == ("error", [("string_type", ())])
+    assert _field_outcome(Holder, "plain", value) == expected
+    assert _field_outcome(Holder, "optional", value) == expected
+
+
+class _UY(ElasticModel):
+    y: int
+
+
+def test_union_branch_without_filled_fields_does_not_accept_data():
+    """
+    Гілка, якій дані не заповнюють жодного поля, значень не підтверджує.
+    `{"x": "bad"}` у `Union[_UA, _UY]` дає помилку прямого поля `_UA`, а не порожній `_UY` з `"x"` в `elastic_extra` (знахідка рев'ю 2026-10-24).
+    """
+    class Holder(ElasticModel):
+        direct: _UA
+        plain: Union[_UA, _UY]
+
+    value = {"x": "bad"}
+
+    expected = _field_outcome(Holder, "direct", value)
+
+    assert expected == ("error", [("int_parsing", ())])
+    assert _field_outcome(Holder, "plain", value) == expected
+
+
+@pytest.mark.parametrize("value", [{"x": 5, "y": 1}, {"x": 1}], ids=["validator-rejects-first", "partial"])
+def test_plain_union_of_basemodel_branches_with_validation_matches_pydantic(value):
+    """
+    Гілки-`BaseModel` з валідацією будує й перевіряє адаптер поля pydantic, як пряме поле, тож результат і помилки — як у `model_validate`.
+    Розширення правила вибору тут нічого не додає: частковий `BaseModel` pydantic однаково не прийме (знахідка рев'ю 2026-10-24).
+    """
+    annotation = _validated_pair_models(BaseModel)
+    data = {"value": value}
+
+    def outcome(create):
+        # Клас гілки порівнюється окремо: `model_dump()` у `VA` і `VB` однаковий
+        try:
+            return "ok", type(create().value).__name__
+        except ValidationError as exc:
+            return "error", [(error["type"], error["loc"][-2:]) for error in exc.errors()]
+
+    expected = outcome(lambda: _holder_of(annotation, BaseModel).model_validate(data))
+
+    assert outcome(lambda: _holder_of(annotation).elastic_create(data)) == expected
+
+
+@pytest.mark.parametrize("field", ["tagged", "plain"])
+def test_validation_methods_with_partial_union_branch(field):
+    """
+    U.11: шляхи `elastic_is_valid()` для часткової гілки `Union` дорівнюють `loc` помилок `model_validate` того самого класу на `BaseModel`.
+    Після присвоєння відсутнього поля модель валідна, а копія з перевірки зберігає гілку та її `elastic_extra`.
+    """
+    data = {field: {"kind": "card", "holder": "X", "zz": 1}}
+
+    with pytest.raises(ValidationError) as caught:
+        _union_holder(BaseModel, (field,)).model_validate(data)
+    expected_paths = [".".join(str(part) for part in error["loc"]) for error in caught.value.errors()]
+
+    m = _union_holder(ElasticModel, (field,)).elastic_create(data)
+
+    assert m.elastic_is_valid() == (False, expected_paths)
+
+    getattr(m, field).pan = "1"
+    assert m.elastic_is_valid() == (True, [])
+
+    validated = m.elastic_get_validated_model()
+
+    assert type(getattr(validated, field)).__name__ == "Card"
+    assert getattr(validated, field).elastic_extra == {"zz": 1}
 
 
 # --------------------------

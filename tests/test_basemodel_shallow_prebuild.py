@@ -175,7 +175,7 @@ def test_shallow_basemodel_with_elastic_leaf_validate_false_then_deep():
 
 
 # ----------------------------------------------------------------
-# 7) BaseModel with discriminated Union (stays dict in shallow)
+# 7) BaseModel with discriminated Union (branch built by tag in shallow)
 # ----------------------------------------------------------------
 
 class CardBM(BaseModel):
@@ -196,8 +196,8 @@ def test_shallow_basemodel_with_discriminated_union_validate_false_then_deep():
     data = {"pay": {"method": {"kind": "card", "pan": "1234"}}}
     w = WrapUnion.elastic_create(data, validate=False)
     assert isinstance(w.pay, PayBM)
-    # shallow: union лишається dict (гілка ще не обрана)
-    assert isinstance(w.pay.method, dict) and w.pay.method["pan"] == "1234"
+    # shallow: гілку обрано за тегом і збудовано без валідації (FR-16)
+    assert isinstance(w.pay.method, CardBM) and w.pay.method.pan == "1234"
 
     # deep: правильна гілка побудується
     wv = w.elastic_get_validated_model(recursive=True)
