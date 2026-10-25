@@ -394,8 +394,10 @@ def build_scenes() -> list[tuple[Image.Image, int]]:
 
     # Сцена 2: pydantic.BaseModel не приймає неповні дані.
     anim.new_scene("pydantic.BaseModel", RED, ("cross",))
-    anim.run_step(pydantic_ns, Step("User.model_validate(doc)", expect="error"))
+    anim.run_step(pydantic_ns, Step("User.model_validate(doc)", expect="error", circle=RED))
+    missing_field.circle = RED  # поле, на яке скаржиться помилка
     anim.say("Oops, we can't build it: full data or nothing", RED, icon="cry", ms=4500)
+    missing_field.circle = None
 
     # Сцена 3: model_construct, два прогони (валідні й невалідні дані).
     anim.new_scene("pydantic.BaseModel.model_construct", YELLOW, ("warn", "cross"))
