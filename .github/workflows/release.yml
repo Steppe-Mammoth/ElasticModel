@@ -1,0 +1,81 @@
+# Публікація на PyPI при публікації GitHub Release.
+# Токена PyPI немає ніде: завантаження йде через Trusted Publishing (OIDC), налаштований на PyPI для цього репозиторію, файлу й environment `pypi`.
+# Структура — за Python Packaging User Guide: збірка окремо від публікації, а публікація лише завантажує готові артефакти.
+# Як налаштувати й випустити реліз — README_DEV.md, розділ 3.
+
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  # Ті самі дві комбінації, що й pre-push hook: мінімальні версії і поточна pydantic.
+  test:
+    name: Tests (Python ${{ matrix.python }}, ${{ matrix.pydantic }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - python: "3.10"
+            pydantic: "pydantic==2.11.0"
+            typing-extensions: "typing-extensions==4.12.2"
+          - python: "3.13"
+            pydantic: "pydantic>=2.11,<3"
+            typing-extensions: "typing-extensions"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install "${{ matrix.pydantic }}" "${{ matrix.typing-extensions }}" pytest email-validator
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    name: Build distribution
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Install build and twine
+        run: python -m pip install build twine
+      - name: Build wheel and sdist
+        run: python -m build
+      # Те саме, що `make check`: README, який PyPI не відрендерить, зупиняє реліз до публікації
+      - name: Check distribution
+        run: python -m twine check --strict dist/*
+      - name: Store the distribution packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/elasticmodel
+    permissions:
+      id-token: write  # обов'язково для Trusted Publishing
+    steps:
+      - name: Download the distribution packages
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
